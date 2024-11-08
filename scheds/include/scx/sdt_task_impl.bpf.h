@@ -175,9 +175,19 @@ static SDT_TASK_FN_ATTRS struct sdt_task_desc __arena *sdt_alloc_chunk(void)
 
 static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *desc)
 {
-	__builtin_memset(desc->chunk, 0, sizeof(*desc->chunk));
+	int i;
+
+	/* Manually zero out the struct because memset() doesn't get inlined. */
+	bpf_for(i, 0, SDT_TASK_ENTS_PER_CHUNK) {
+		desc->chunk->descs[i] = NULL;
+	}
 	sdt_task_free_to_pool(desc->chunk, &sdt_task_chunk_pool);
-	__builtin_memset(desc, 0, sizeof(*desc));
+
+	bpf_for(i, 0, SDT_TASK_CHUNK_BITMAP_U64S) {
+		desc->bitmap[i] = 0;
+	}
+	desc->nr_free = 0;
+	desc->chunk = NULL;
 	sdt_task_free_to_pool(desc, &sdt_task_desc_pool);
 }
 
