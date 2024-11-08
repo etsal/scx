@@ -7,12 +7,8 @@
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 1 << 20); /* number of pages */
-#ifdef __TARGET_ARCH_arm64
-        __ulong(map_extra, (1ull << 32) | (~0u - __PAGE_SIZE * 2 + 1)); /* start of mmap() region */
-#else
-        __ulong(map_extra, (1ull << 44) | (~0u - __PAGE_SIZE * 2 + 1)); /* start of mmap() region */
-#endif
+	__uint(max_entries, 1 << 6); /* number of pages */
+        __ulong(map_extra, (1ull << 44)); /* start of mmap() region */
 } arena __weak SEC(".maps");
 
 /*
@@ -216,6 +212,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 	struct sdt_task_desc __arena *desc = sdt_task_desc_root;
 	struct sdt_task_data __arena *data;
 	__u64 level, pos;
+	int i;
 
 	bpf_spin_lock(&sdt_task_lock);
 
@@ -236,7 +233,9 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 	if (data) {
 		data->tid.gen++;
 		data->tptr = 0;
-		__builtin_memset(data->data, 0, sdt_task_data_size);
+		bpf_for(i, 0, sdt_task_data_size / 8) {
+			data->data[i] = 0;
+		}
 	}
 
 	bpf_spin_unlock(&sdt_task_lock);
@@ -335,6 +334,10 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 		__u64 lv_pos = level_pos[level];
 
 		level_desc[level]->bitmap[lv_pos / 64] |= 1LU << (lv_pos & 0x3f);
+		/*
+		 * XXX This looks like a leak, we may have already marked the
+		 * bitmap as occupied in the lower levels before bailing.
+		 */
 		if (--level_desc[level]->nr_free)
 			goto out_unlock;
 	}
