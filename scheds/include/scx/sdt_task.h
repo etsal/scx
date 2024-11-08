@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bpf_arena.h"
+#include "bpf_arena_common.h"
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
