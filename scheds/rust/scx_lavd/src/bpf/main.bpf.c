@@ -16,7 +16,7 @@
  * similar to other deadline-based scheduling algorithms. Under LAVD, a
  * runnable task has its time slice and virtual deadline. The LAVD scheduler
  * picks a task with the closest virtual deadline and allows it to execute for
- * the given time slice. 
+ * the given time slice.
  *
  *
  * 2. Latency criticality: how to determine how latency-critical a task is
@@ -270,7 +270,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
-	 * consumer. If it is a synchronous wakeup, doule the prioritization.
+	 * consumer. If it is a synchronous wakeup, double the prioritization.
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
 	weight_boost += taskc->wakeup_ft * LAVD_LC_WEIGHT_BOOST;
@@ -458,26 +458,36 @@ static void update_stat_for_runnable(struct task_struct *p,
 static void advance_cur_logical_clk(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 vlc, clc;
+	u64 vlc, clc, ret_clc;
 	u64 nr_queued, delta, new_clk;
 
-	/*
-	 * The clock should not go backward, so do nothing.
-	 */
 	vlc = READ_ONCE(taskc->vdeadline_log_clk);
 	clc = READ_ONCE(cur_logical_clk);
-	if (vlc <= clc)
-		return;
 
-	/*
-	 * Advance the clock up to the task's deadline. When overloaded,
-	 * advance the clock slower so other can jump in the run queue.
-	 */
-	nr_queued = max(stat_cur->nr_queued_task, 1);
-	delta = (vlc - clc) / nr_queued;
-	new_clk = clc + delta;
+	for (int i = 0; i < LAVD_MAX_RETRY; ++i) {
+		/*
+		 * The clock should not go backward, so do nothing.
+		 */
+		if (vlc <= clc)
+			return;
 
-	WRITE_ONCE(cur_logical_clk, new_clk);
+		/*
+		 * Advance the clock up to the task's deadline. When overloaded,
+		 * advance the clock slower so other can jump in the run queue.
+		 */
+		nr_queued = max(stat_cur->nr_queued_task, 1);
+		delta = (vlc - clc) / nr_queued;
+		new_clk = clc + delta;
+
+		ret_clc = __sync_val_compare_and_swap(&cur_logical_clk, clc, new_clk);
+		if (ret_clc == clc) /* CAS success */
+			return;
+
+		/*
+		 * Retry with the updated clc
+		 */
+		clc = ret_clc;
+	}
 }
 
 static void update_stat_for_running(struct task_struct *p,
@@ -505,7 +515,7 @@ static void update_stat_for_running(struct task_struct *p,
 	}
 
 	/*
-	 * Update per-CPU latency criticality information for ever-scheduled
+	 * Update per-CPU latency criticality information for every-scheduled
 	 * tasks.
 	 */
 	if (cpuc->max_lat_cri < taskc->lat_cri)
@@ -572,7 +582,7 @@ static void update_stat_for_running(struct task_struct *p,
 
 	if (taskc->victim_cpu >= 0)
 		cpuc->nr_preemption++;
-	
+
 	if (is_lat_cri(taskc, stat_cur))
 		cpuc->nr_lat_cri++;
 
@@ -1064,7 +1074,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Calculate when a tack can be scheduled.
+	 * Calculate when a task can be scheduled.
 	 */
 	calc_when_to_run(p, taskc, enq_flags);
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
@@ -1158,13 +1168,13 @@ static bool consume_starving_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 
 		if (dsq_id == cpuc->cpdom_id)
 			continue;
-	
+
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 		if (!cpdomc) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
 			goto out;
 		}
-	
+
 		if (cpdomc->is_active) {
 			dl = READ_ONCE(cpdomc->last_consume_clk) + LAVD_CPDOM_STARV_NS;
 			if (dl < now) {
@@ -1229,12 +1239,12 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 
 			if (!cpdomc_pick->is_active)
 				continue;
-	
+
 			if (consume_dsq(cpu, dsq_id, now))
 				return true;
 		}
 	}
-	
+
 	return false;
 }
 
@@ -1910,7 +1920,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	u64 cpdom_id;
 	u32 sum_capacity = 0, avg_capacity, big_capacity = 0;
 	u16 turbo_cap;
-	
+
 	bpf_rcu_read_lock();
 
 	/*

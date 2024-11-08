@@ -22,8 +22,8 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile u32 debug = 0;
-const volatile u64 slice_ns = SCX_SLICE_DFL;
-const volatile u64 max_exec_ns = 20 * SCX_SLICE_DFL;
+const volatile u64 slice_ns;
+const volatile u64 max_exec_ns;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 llc_numa_id_map[MAX_LLCS];
@@ -131,6 +131,11 @@ u32 llc_node_id(u32 llc_id)
 static u64 llc_hi_fallback_dsq_id(u32 llc_id)
 {
 	return HI_FALLBACK_DSQ_BASE + llc_id;
+}
+
+static inline bool is_fallback_dsq(u64 dsq_id)
+{
+	return dsq_id > HI_FALLBACK_DSQ_BASE && dsq_id <= LO_FALLBACK_DSQ;
 }
 
 static u64 llc_hi_fallback_dsq_iter_offset(int llc_offset, int idx)
@@ -296,7 +301,7 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	struct layer_cpumask_wrapper *cpumaskw;
 
 	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx))) {
-		return (struct cpumask *)cpumaskw->cpumask;
+		return cast_mask(cpumaskw->cpumask);
 	} else {
 		scx_bpf_error("no layer_cpumask");
 		return NULL;
@@ -383,6 +388,7 @@ struct task_ctx {
 	bool			all_cpus_allowed;
 	u64			runnable_at;
 	u64			running_at;
+	u64			last_dsq;
 };
 
 struct {
@@ -496,7 +502,7 @@ static void maybe_refresh_layered_cpumask(struct cpumask *layered_cpumask,
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_smtmask)
+			      const struct cpumask *idle_smtmask, bool pref_idle_smt)
 {
 	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
 	s32 cpu;
@@ -505,7 +511,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
 	 * partially idle @prev_cpu.
 	 */
-	if (smt_enabled) {
+	if (smt_enabled && !pref_idle_smt) {
 		if (prev_in_cand &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
@@ -555,7 +561,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
+	if (!(layered_cpumask = cast_mask(tctx->layered_cpumask)) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
 			return -1;
 
@@ -585,7 +591,8 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 	 */
 	idle_cpumask = scx_bpf_get_idle_smtmask();
 	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_cpumask)) >= 0)
+				      idle_cpumask,
+				      layer->idle_smt)) >= 0)
 		goto out_put;
 
 out_put:
@@ -609,14 +616,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
+	if (!(layered_cpumask = cast_mask(tctx->layered_cpumask)) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)) ||
 	    !(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
 	    !(nodec = lookup_node_ctx(cctx->node_idx)))
 			return -1;
 
-	if (!(cache_cpumask = (struct cpumask *)cachec->cpumask) ||
-	    !(node_cpumask = (struct cpumask *)nodec->cpumask))
+	if (!(cache_cpumask = cast_mask(cachec->cpumask)) ||
+	    !(node_cpumask = cast_mask(nodec->cpumask)))
 		return -1;
 
 	/* not much to do if bound to a single CPU */
@@ -661,7 +668,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
 			cast_mask(pref_idle_cpumask));
 	if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-				      prev_cpu, idle_cpumask)) >= 0)
+				      prev_cpu, idle_cpumask,
+				      layer->idle_smt)) >= 0)
 		goto out_put;
 
 	/*
@@ -684,7 +692,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 				cast_mask(pref_idle_cpumask));
 
 		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask)) >= 0)
+					      prev_cpu, idle_cpumask,
+					      layer->idle_smt)) >= 0)
 			goto out_put;
 	}
 
@@ -702,7 +711,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
 				cast_mask(pref_idle_cpumask));
 		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask)) >= 0)
+					      prev_cpu, idle_cpumask,
+					      layer->idle_smt)) >= 0)
 			goto out_put;
 	}
 
@@ -711,7 +721,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
 	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_cpumask)) >= 0)) {
+				       idle_cpumask,
+				       layer->idle_smt)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
 		goto out_put;
 	}
@@ -1076,6 +1087,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1102,15 +1114,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
+		tctx->last_dsq = idx;
 		goto preempt;
 	}
 
 	if (disable_topology) {
+		tctx->last_dsq = tctx->layer;
 		scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
 	} else {
 		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
 					   bpf_get_smp_processor_id());
 		idx = layer_dsq_id(layer->idx, llc_id);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch_vtime(p, idx, layer_slice_ns, vtime, enq_flags);
 	}
 
@@ -1247,6 +1262,16 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	/*
+	 * If one of the fallback DSQs has the most budget then consume from
+	 * it to prevent starvation.
+	 */
+	if (has_pref_fallback_budget(costc)) {
+		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
+		if (scx_bpf_consume(dsq_id))
+			return;
+	}
+
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(costc->pref_layer, idx);
@@ -1306,7 +1331,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
-int consume_preempting(struct cost *costc, u32 my_llc_id)
+__weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1322,12 +1347,13 @@ int consume_preempting(struct cost *costc, u32 my_llc_id)
 			return -EINVAL;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
+		if (!layer->preempt || has_budget(costc, layer) == 0)
 			continue;
+
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (layer->preempt && scx_bpf_consume(dsq_id))
+			if (scx_bpf_consume(dsq_id))
 				return 0;
 		}
 	}
@@ -1335,7 +1361,7 @@ int consume_preempting(struct cost *costc, u32 my_llc_id)
 	return -ENOENT;
 }
 
-int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
+__weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1353,28 +1379,27 @@ int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(costc, layer) == 0)
 			continue;
+
+		struct cpumask *layer_cpumask;
+		if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+			return 0;
+		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
+		    (cpu > nr_possible_cpus || cpu != fallback_cpu || layer->nr_cpus != 0))
+			continue;
+
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			struct cpumask *layer_cpumask;
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+			if (scx_bpf_consume(dsq_id))
 				return 0;
-
-			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-			    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-			    layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
 		}
 	}
 
 	return -ENOENT;
 }
 
-int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
+__weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1392,11 +1417,13 @@ int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(costc, layer) == 0)
 			continue;
+		if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
+			continue;
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			if (!layer->preempt && layer->kind != LAYER_KIND_CONFINED && scx_bpf_consume(dsq_id))
+			if (scx_bpf_consume(dsq_id))
 				return 0;
 		}
 	}
@@ -1444,19 +1471,17 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	u32 my_llc_id = cpu_to_llc_id(cpu);
+
 	/*
-	 * Fallback DSQs don't have cost accounting. When the budget runs out
-	 * for a layer we do an extra consume of the fallback DSQ to ensure
-	 * that it doesn't stall out when the system is being saturated.
+	 * If one of the fallback DSQs has the most budget then consume from
+	 * it to prevent starvation.
 	 */
-	if (costc->drain_fallback) {
-		costc->drain_fallback = false;
-		dsq_id = cpu_hi_fallback_dsq_id(cpu);
+	if (has_pref_fallback_budget(costc)) {
+		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
 		if (scx_bpf_consume(dsq_id))
 			return;
 	}
-
-	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/* consume preempting layers first */
 	if (consume_preempting(costc, my_llc_id) == 0)
@@ -1878,6 +1903,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *tctx;
 	struct layer *layer;
 	struct cost *costc;
+	u32 budget_id;
 	s32 lidx;
 	u64 used;
 
@@ -1895,7 +1921,15 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		used = layer->min_exec_ns;
 	}
 
-	record_cpu_cost(costc, layer->idx, (s64)used);
+	// If the task ran on the hi fallback dsq then the cost should be
+	// charged to it.
+	if (is_fallback_dsq(tctx->last_dsq)) {
+		budget_id = fallback_dsq_cost_id(tctx->last_dsq);
+	} else {
+		budget_id = layer->idx;
+	}
+	record_cpu_cost(costc, budget_id, (s64)used);
+
 	cctx->layer_cycles[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
@@ -1969,7 +2003,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	}
 
 	tctx->all_cpus_allowed =
-		bpf_cpumask_subset((const struct cpumask *)all_cpumask, cpumask);
+		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
@@ -2014,7 +2048,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 
 	if (all_cpumask)
 		tctx->all_cpus_allowed =
-			bpf_cpumask_subset((const struct cpumask *)all_cpumask, p->cpus_ptr);
+			bpf_cpumask_subset(cast_mask(all_cpumask), p->cpus_ptr);
 	else
 		scx_bpf_error("missing all_cpumask");
 
@@ -2111,11 +2145,24 @@ int dump_cost(void)
 			     j, layer->name,
 			     costc->budget[j], costc->capacity[j]);
 	}
+	// fallback DSQs
+	bpf_for(i, 0, nr_llcs) {
+		u64 dsq_id = llc_hi_fallback_dsq_id(i);
+		u32 budget_id = fallback_dsq_cost_id(dsq_id);
+		scx_bpf_dump("COST FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
+			     dsq_id, budget_id,
+			     costc->budget[budget_id], costc->capacity[budget_id]);
+	}
+
 	// Per CPU costs
 	bpf_for(i, 0, nr_possible_cpus) {
+		if (!(costc = lookup_cpu_cost(j))) {
+			scx_bpf_error("unabled to lookup layer %d", i);
+			continue;
+		}
 		bpf_for(j, 0, nr_layers) {
 			layer = lookup_layer(i);
-			if (!layer || !(costc = lookup_cpu_cost(j))) {
+			if (!layer) {
 				scx_bpf_error("unabled to lookup layer %d", i);
 				continue;
 			}
@@ -2123,7 +2170,17 @@ int dump_cost(void)
 				     i, j, layer->name,
 				     costc->budget[j], costc->capacity[j]);
 		}
+		bpf_for(j, 0, nr_llcs) {
+			u64 dsq_id = llc_hi_fallback_dsq_id(j);
+			u32 budget_id = fallback_dsq_cost_id(dsq_id);
+			if (budget_id >= MAX_GLOBAL_BUDGETS)
+				continue;
+			scx_bpf_dump("COST CPU[%d]FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
+				     i, j, dsq_id, budget_id,
+				     costc->budget[budget_id], costc->capacity[budget_id]);
+		}
 	}
+
 	return 0;
 }
 
