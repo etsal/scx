@@ -35,15 +35,15 @@ private(LOCK) struct bpf_spin_lock sdt_task_lock;
 private(POOL_LOCK) struct bpf_spin_lock sdt_task_pool_alloc_lock;
 
 /* allocation pools */
-struct sdt_task_pool __arena_global sdt_task_desc_pool = {
+struct sdt_task_pool __arena sdt_task_desc_pool = {
 	.elem_size			= sizeof(struct sdt_task_desc),
 };
 
-struct sdt_task_pool __arena_global sdt_task_chunk_pool = {
+struct sdt_task_pool __arena sdt_task_chunk_pool = {
 	.elem_size			= sizeof(struct sdt_task_chunk),
 };
 
-struct sdt_task_pool __arena_global sdt_task_data_pool;
+struct sdt_task_pool __arena sdt_task_data_pool;
 
 static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
 {
