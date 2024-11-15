@@ -77,12 +77,11 @@ void BPF_STRUCT_OPS_SLEEPABLE(sdt_exit_task, struct task_struct *p,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
-#if 0
 	int ret;
 	ret = sdt_task_init(sizeof(struct sdt_task_ctx));
 	if (ret < 0)
 		return ret;
-#endif
+
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 

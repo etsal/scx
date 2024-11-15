@@ -94,13 +94,13 @@ static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena 
 static SDT_TASK_FN_ATTRS
 void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 {
-	struct sdt_task_pool_elem __arena *elem = NULL;
+	arena_list_node_t *elem = NULL;
 	void __arena *new_page = NULL;
 	__u32 u;
 
 	bpf_repeat(2) {
 		/* if pool is empty, get new page */
-		if (!pool->first) {
+		if (!pool->head.first) {
 			new_page = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
 			if (!new_page)
 				return NULL;
@@ -109,21 +109,20 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 		bpf_spin_lock(&sdt_task_pool_alloc_lock);
 
 		/* fill free list */
-		if (!pool->first && new_page) {
+		if (!pool->head.first && new_page) {
 			bpf_for(u, 0, PAGE_SIZE / pool->elem_size) {
-				struct sdt_task_pool_elem __arena *new_elem =
+				arena_list_node_t *new_elem =
 					new_page + u * pool->elem_size;
 
-				new_elem->next = pool->first;
-				pool->first = new_elem;
+				list_add_head(new_elem, MEMBER_VPTR(*pool, .head));
 			}
 			new_page = NULL;
 		}
 
 		/* allocate from free list */
-		if (pool->first) {
-			elem = pool->first;
-			pool->first = elem->next;
+		if (pool->head.first) {
+			elem = pool->head.first;
+			list_del(elem);
 			bpf_spin_unlock(&sdt_task_pool_alloc_lock);
 			break;
 		}
@@ -141,11 +140,10 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 static SDT_TASK_FN_ATTRS
 void sdt_task_free_to_pool(void __arena *ptr, struct sdt_task_pool __arena *pool)
 {
-	struct sdt_task_pool_elem __arena *elem = ptr;
+	arena_list_node_t *elem = ptr;
 
 	bpf_spin_lock(&sdt_task_pool_alloc_lock);
-	elem->next = pool->first;
-	pool->first = elem;
+	list_del(elem);
 	bpf_spin_unlock(&sdt_task_pool_alloc_lock);
 }
 

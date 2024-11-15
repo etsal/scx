@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bpf_arena_common.h"
+#include "bpf_arena_list.h"
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
@@ -54,15 +55,7 @@ struct sdt_task_chunk {
 	};
 };
 
-/*
- * Simple memory allocation pool to allocate the descriptors, intermediate and
- * leaf nodes.
- */
-struct sdt_task_pool_elem {
-	struct sdt_task_pool_elem __arena *next;
-};
-
 struct sdt_task_pool {
-	struct sdt_task_pool_elem __arena *first;
+	arena_list_head_t		head;
 	__u64				elem_size;
 };
