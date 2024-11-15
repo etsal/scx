@@ -55,25 +55,20 @@ void BPF_STRUCT_OPS(sdt_dispatch, s32 cpu, struct task_struct *prev)
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
-	/* XXX Successfully turn on. */
-#if 0
 	struct sdt_task_data __arena *data;
 
 	data = sdt_task_alloc(p);
 	if (!data)
 		return -ENOMEM;
-#endif
+
 	return 0;
 }
 
-/* XXX Successfully turn on. */
-#if 0
 void BPF_STRUCT_OPS_SLEEPABLE(sdt_exit_task, struct task_struct *p,
 			      struct scx_exit_task_args *args)
 {
 	sdt_task_free(p);
 }
-#endif
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
@@ -95,9 +90,7 @@ SCX_OPS_DEFINE(sdt_ops,
 	       .enqueue			= (void *)sdt_enqueue,
 	       .dispatch		= (void *)sdt_dispatch,
 	       .init_task		= (void *)sdt_init_task,
-#if 0
 	       .exit_task		= (void *)sdt_exit_task,
-#endif
 	       .init			= (void *)sdt_init,
 	       .exit			= (void *)sdt_exit,
 	       .name			= "sdt");

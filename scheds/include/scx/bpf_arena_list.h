@@ -64,8 +64,12 @@ static inline void list_add_head(arena_list_node_t *n, arena_list_head_t *h)
 
 static inline void __list_del(arena_list_node_t *n)
 {
-	arena_list_node_t *next = n->next, *tmp;
-	arena_list_node_t * __arena *pprev = n->pprev;
+	arena_list_node_t *next, *tmp;
+	arena_list_node_t * __arena *pprev;
+
+	cast_kern(n);
+	next = n->next;
+	pprev = n->pprev;
 
 	cast_user(next);
 	cast_kern(pprev);
@@ -86,6 +90,8 @@ static inline void __list_del(arena_list_node_t *n)
 
 static inline void list_del(arena_list_node_t *n)
 {
+	cast_kern(n);
+
 	__list_del(n);
 	n->next = LIST_POISON1;
 	n->pprev = LIST_POISON2;

@@ -80,6 +80,8 @@ static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena 
 	__u64 pos = 0;
 	__u64 i;
 
+	cast_kern(desc);
+
 	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
 		if (desc->bitmap[i] == ~(__u64)0)
 			pos += 64;
@@ -162,6 +164,8 @@ static SDT_TASK_FN_ATTRS struct sdt_task_desc __arena *sdt_alloc_chunk(void)
 		return NULL;
 	}
 
+	cast_kern(desc);
+
 	desc->nr_free = SDT_TASK_ENTS_PER_CHUNK;
 	desc->chunk = chunk;
 	return desc;
@@ -169,17 +173,24 @@ static SDT_TASK_FN_ATTRS struct sdt_task_desc __arena *sdt_alloc_chunk(void)
 
 static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *desc)
 {
+	struct sdt_task_chunk __arena *chunk;
 	int i;
+
+	cast_kern(desc);
+
+	chunk = desc->chunk;
+	cast_kern(chunk);
 
 	/* Manually zero out the struct because memset() doesn't get inlined. */
 	bpf_for(i, 0, SDT_TASK_ENTS_PER_CHUNK) {
-		desc->chunk->descs[i] = NULL;
+		chunk->descs[i] = NULL;
 	}
 	sdt_task_free_to_pool(desc->chunk, &sdt_task_chunk_pool);
 
 	bpf_for(i, 0, SDT_TASK_CHUNK_BITMAP_U64S) {
 		desc->bitmap[i] = 0;
 	}
+
 	desc->nr_free = 0;
 	desc->chunk = NULL;
 	sdt_task_free_to_pool(desc, &sdt_task_desc_pool);
@@ -208,27 +219,35 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 {
 	struct sdt_task_desc __arena *desc = sdt_task_desc_root;
+	struct sdt_task_chunk __arena *chunk;
 	struct sdt_task_data __arena *data;
-	__u64 level, pos;
+	__u64 level;
+	__u32 pos;
 	int i;
 
 	bpf_spin_lock(&sdt_task_lock);
 
 	/* clear full bit walking down the tree */
 	bpf_for(level, 0, SDT_TASK_LEVELS) {
-		pos = ((__u64)idx >> ((SDT_TASK_LEVELS - 1 - level) *
+		pos = ((__u32)idx >> ((SDT_TASK_LEVELS - 1 - level) *
 				      SDT_TASK_ENTS_PER_CHUNK_SHIFT)) &
 			((1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT) - 1);
 
+		cast_kern(desc);
 		desc->bitmap[pos / 64] &= ~(1LU << (pos & 0x3f));
 		desc->nr_free++;
 
-		desc = desc->chunk->descs[pos];
+		chunk = desc->chunk;
+		cast_kern(chunk);
+
+		desc = chunk->descs[pos];
 	}
 
 	/* reset and inc gen */
 	data = (void __arena *)desc;
 	if (data) {
+		cast_kern(data);
+
 		data->tid.gen++;
 		data->tptr = 0;
 		bpf_for(i, 0, sdt_task_data_size / 8) {
@@ -256,8 +275,10 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 	struct sdt_task_desc __arena *new_chunk = NULL;
 	struct sdt_task_data __arena *data = NULL;
 	struct sdt_task_desc __arena *desc;
+	struct sdt_task_chunk __arena *chunk;
 	struct sdt_task_map_val *mval;
 	struct sdt_task_desc __arena *level_desc[SDT_TASK_LEVELS];
+	struct sdt_task_desc __arena *curdesc;
 	__u64 level_pos[SDT_TASK_LEVELS];
 	__u64 u, level, idx, pos;
 
@@ -278,6 +299,8 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 
 		/* walk the first two levels */
 		bpf_for(level, 0, SDT_TASK_LEVELS - 1) {
+			cast_kern(desc);
+
 			pos = sdt_task_find_empty(desc);
 			if (pos < 0)
 				goto out_unlock;
@@ -287,7 +310,10 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 			idx |= pos << ((SDT_TASK_LEVELS - 1 - level) *
 				       SDT_TASK_ENTS_PER_CHUNK_SHIFT);
 
-			desc = desc->chunk->descs[pos];
+			chunk = desc->chunk;
+			cast_kern(chunk);
+
+			desc = chunk->descs[pos];
 			if (!desc) {
 				if (!new_chunk && sdt_task_new_chunk) {
 					new_chunk = sdt_task_new_chunk;
@@ -295,8 +321,9 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 				}
 
 				if (new_chunk) {
-					desc->chunk->descs[pos] = new_chunk;
+					chunk->descs[pos] = new_chunk;
 					desc = new_chunk;
+
 					new_chunk = NULL;
 				} else {
 					bpf_spin_unlock(&sdt_task_lock);
@@ -322,26 +349,41 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 	if (pos < 0)
 		goto out_unlock;
 
-	level_desc[level] = desc;
-	level_pos[level] = pos;
-	idx |= pos;
+	/*
+	 * NOTE: Using levels as an index generates unverifiable BPF code.
+	 */
+	level_desc[SDT_TASK_LEVELS-1] = desc;
+	level_pos[SDT_TASK_LEVELS-1] = pos;
+
+	/*
+	 * Note: OR'ing a pointer is prohibited, but offsetting it is not.
+	 */
+	idx += pos;
 
 	/* walk up marking full bit as necessary */
 	bpf_for(u, 0, SDT_TASK_LEVELS) {
 		level = SDT_TASK_LEVELS - 1 - u;
 		__u64 lv_pos = level_pos[level];
 
-		level_desc[level]->bitmap[lv_pos / 64] |= 1LU << (lv_pos & 0x3f);
+		curdesc = level_desc[level];
+		cast_kern(curdesc);
+
+		curdesc->bitmap[lv_pos / 64] |= 1LU << (lv_pos & 0x3f);
 		/*
 		 * XXX This looks like a leak, we may have already marked the
 		 * bitmap as occupied in the lower levels before bailing.
 		 */
-		if (--level_desc[level]->nr_free)
+		if (--curdesc->nr_free)
 			goto out_unlock;
 	}
 
+	cast_kern(desc);
+
+	chunk = desc->chunk;
+	cast_kern(chunk);
+
 	/* populate leaf node if necessary */
-	data = desc->chunk->data[pos];
+	data = chunk->data[pos];
 	if (!data) {
 		bpf_spin_unlock(&sdt_task_lock);
 		data = sdt_task_alloc_from_pool(&sdt_task_data_pool);
@@ -351,12 +393,16 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 		if (!data)
 			goto out_unlock;
 
+		cast_kern(data);
+
 		data->tid.idx = idx;
-		desc->chunk->data[pos] = data;
+		chunk->data[pos] = data;
 	}
 
 	/* init and return */
+	cast_kern(data);
 	data->tptr = (__u64)p;
+
 	mval->tid = data->tid;
 	mval->data = data;
 
