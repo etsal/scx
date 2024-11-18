@@ -8,8 +8,7 @@
 #endif
 
 enum sdt_task_consts {
-	SDT_TASK_LEVELS			= 3,	/* three levels of internal nodes */
-	SDT_TASK_ENT_SIZE		= sizeof(void *),
+	SDT_TASK_LEVELS			= 1,	/* three levels of internal nodes */
 	SDT_TASK_ENTS_PER_CHUNK_SHIFT	= 9,
 	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT,
 };
