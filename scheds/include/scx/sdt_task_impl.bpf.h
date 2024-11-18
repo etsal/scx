@@ -45,48 +45,16 @@ struct sdt_task_pool __arena sdt_task_chunk_pool = {
 
 struct sdt_task_pool __arena sdt_task_data_pool;
 
-static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
-{
-	unsigned int num = 0;
-
-	if ((word & 0xffffffff) == 0) {
-		num += 32;
-		word >>= 32;
-	}
-	if ((word & 0xffff) == 0) {
-		num += 16;
-		word >>= 16;
-	}
-	if ((word & 0xff) == 0) {
-		num += 8;
-		word >>= 8;
-	}
-	if ((word & 0xf) == 0) {
-		num += 4;
-		word >>= 4;
-	}
-	if ((word & 0x3) == 0) {
-		num += 2;
-		word >>= 2;
-	}
-	if ((word & 0x1) == 0)
-		num += 1;
-	return num;
-}
-
 /* find the first empty slot */
 static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena *desc)
 {
-	__u64 pos = 0;
 	__u64 i;
 
 	cast_kern(desc);
 
-	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
-		if (desc->bitmap[i] == ~(__u64)0)
-			pos += 64;
-		else
-			return pos + sdt_ffs(~desc->bitmap[i]);
+	for (i = 0; i < SDT_TASK_ENTS_PER_CHUNK; i++) {
+		if (!desc->allocated[i])
+			return i;
 	}
 
 	return -EBUSY;
@@ -187,8 +155,8 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *
 	}
 	sdt_task_free_to_pool(desc->chunk, &sdt_task_chunk_pool);
 
-	bpf_for(i, 0, SDT_TASK_CHUNK_BITMAP_U64S) {
-		desc->bitmap[i] = 0;
+	bpf_for(i, 0, SDT_TASK_ENTS_PER_CHUNK) {
+		desc->allocated[i] = false;
 	}
 
 	desc->nr_free = 0;
@@ -233,7 +201,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 				      SDT_TASK_ENTS_PER_CHUNK_SHIFT)) &
 			((1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT) - 1);
 
-		desc->bitmap[pos / 64] &= ~(1LU << (pos & 0x3f));
+		desc->allocated[pos] = false;
 		desc->nr_free++;
 
 		chunk = desc->chunk;
@@ -377,7 +345,7 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 		curdesc = level_desc[level];
 		cast_kern(curdesc);
 
-		curdesc->bitmap[lv_pos / 64] |= 1LU << (lv_pos & 0x3f);
+		curdesc->allocated[lv_pos] = true;
 		/*
 		 * XXX This looks like a leak, we may have already marked the
 		 * bitmap as occupied in the lower levels before bailing.
