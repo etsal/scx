@@ -233,7 +233,6 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 				      SDT_TASK_ENTS_PER_CHUNK_SHIFT)) &
 			((1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT) - 1);
 
-		cast_kern(desc);
 		desc->bitmap[pos / 64] &= ~(1LU << (pos & 0x3f));
 		desc->nr_free++;
 
@@ -241,20 +240,29 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 		cast_kern(chunk);
 
 		desc = chunk->descs[pos];
+		if (!desc)
+			goto done;
+
+		cast_kern(desc);
 	}
+
+	if (!desc)
+		goto done;
 
 	/* reset and inc gen */
-	data = (void __arena *)desc;
-	if (data) {
-		cast_kern(data);
+	data = (struct sdt_task_data __arena *)desc;
+	cast_kern(data);
 
-		data->tid.gen++;
-		data->tptr = 0;
-		bpf_for(i, 0, sdt_task_data_size / 8) {
-			data->data[i] = 0;
-		}
+	*data = (struct sdt_task_data) {
+		.tid.gen = data->tid.gen + 1,
+		.tptr = 0,
+	};
+
+	bpf_for(i, 0, sdt_task_data_size / 8) {
+		data->data[i] = 0;
 	}
 
+done:
 	bpf_spin_unlock(&sdt_task_lock);
 }
 
