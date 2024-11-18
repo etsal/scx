@@ -64,7 +64,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS_SLEEPABLE(sdt_exit_task, struct task_struct *p,
+void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 			      struct scx_exit_task_args *args)
 {
 	sdt_task_free(p);
