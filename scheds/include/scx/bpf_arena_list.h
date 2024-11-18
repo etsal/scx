@@ -96,3 +96,24 @@ static inline void list_del(arena_list_node_t *n)
 	n->next = LIST_POISON1;
 	n->pprev = LIST_POISON2;
 }
+
+static inline arena_list_node_t *list_pop(arena_list_head_t *h)
+{
+	arena_list_node_t *first = h->first;
+	arena_list_node_t *tmp;
+	arena_list_node_t *next;
+
+	if (!first)
+		return NULL;
+
+	tmp = first;
+	cast_kern(tmp);
+	next = tmp->next;
+
+	list_del(first);
+
+	cast_kern(h);
+	h->first = next;
+
+	return first;
+}
