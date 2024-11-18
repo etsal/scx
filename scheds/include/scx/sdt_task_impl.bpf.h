@@ -7,7 +7,7 @@
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 1 << 6); /* number of pages */
+	__uint(max_entries, 1 << 8); /* number of pages */
         __ulong(map_extra, (1ull << 44)); /* start of mmap() region */
 } arena __weak SEC(".maps");
 
@@ -67,36 +67,38 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 	arena_list_node_t *elem = NULL;
 	void __arena *new_page = NULL;
 	arena_list_node_t *new_elem;
-	__u32 u;
+	__u32 u, numelems;
 
 	/* if pool is empty, get new page */
-	if (!pool->head.first) {
-		new_page = bpf_arena_alloc_pages(&arena, NULL, 64, NUMA_NO_NODE, 0);
-		if (!new_page)
-			return NULL;
+	bpf_spin_lock(&sdt_task_pool_alloc_lock);
+
+	if (pool->head.first) {
+		elem = list_pop(&pool->head);
+		bpf_spin_unlock(&sdt_task_pool_alloc_lock);
+		return (void __arena *)elem;
 	}
 
-	//bpf_spin_lock(&sdt_task_pool_alloc_lock);
+	bpf_spin_unlock(&sdt_task_pool_alloc_lock);
 
-	/* fill free list */
-	if (!pool->head.first && new_page) {
-		bpf_for(u, 0, (64 * PAGE_SIZE) / pool->elem_size) {
-			new_elem = new_page + u * pool->elem_size;
+	new_page = bpf_arena_alloc_pages(&arena, NULL, 64, NUMA_NO_NODE, 0);
+	if (!new_page)
+		return NULL;
 
-			list_add_head(new_elem, &pool->head);
-		}
+	/*
+	 * Push all allocated elements except for last one that we use to
+	 * satisfy the allocation.
+	 */
 
-		new_page = NULL;
+	numelems = (64 * PAGE_SIZE) / pool->elem_size;
+	bpf_for(u, 0, numelems - 1) {
+		new_elem = new_page + u * pool->elem_size;
+
+		bpf_spin_lock(&sdt_task_pool_alloc_lock);
+		list_add_head(new_elem, &pool->head);
+		bpf_spin_unlock(&sdt_task_pool_alloc_lock);
 	}
 
-	/* allocate from free list */
-	elem = list_pop(&pool->head);
-
-	//bpf_spin_unlock(&sdt_task_pool_alloc_lock);
-
-	/* return new_page if not used */
-	if (new_page)
-		bpf_arena_free_pages(&arena, new_page, 1);
+	elem = new_page + (numelems - 1) * pool->elem_size;
 
 	return (void __arena *)elem;
 }
