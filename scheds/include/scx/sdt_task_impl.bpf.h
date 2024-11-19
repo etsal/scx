@@ -27,13 +27,8 @@ struct {
 	__type(value, struct sdt_task_map_val);
 } sdt_task_map SEC(".maps");
 
-/* radix tree root */
-struct sdt_task_root {
-	struct sdt_task_desc __arena *root;
-};
-
 /*
- * XXX Hack to get the verifier to find the arena for sdt_exit_task
+ * XXX Hack to get the verifier to find the arena for sdt_exit_task.
  * As of 6.12-rc5, The verifier associates arenas with programs by
  * checking LD.IMM instruction operands for an arena and populating
  * the program state with the first instance it finds. This requires
@@ -54,7 +49,7 @@ static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
 	sdt_verify_once = true;
 }
 
-static struct sdt_task_root sdt_task_desc_root;
+struct sdt_task_desc __arena *sdt_task_desc_root;
 static struct sdt_task_desc __arena *sdt_task_new_chunk; /* new chunk cache */
 static __u64 __arena sdt_task_data_size; /* requested per-task data size */
 
@@ -154,7 +149,7 @@ static SDT_TASK_FN_ATTRS int __arena sdt_alloc_chunk(void)
 		return -ENOMEM;
 	}
 
-	sdt_task_desc_root.root = desc;
+	sdt_task_desc_root = desc;
 
 	cast_kern(desc);
 
@@ -228,10 +223,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 
 	//bpf_spin_lock(&sdt_task_lock);
 
-	if (!sdt_task_desc_root.root)
-		return;
-
-	desc = sdt_task_desc_root.root;
+	desc = sdt_task_desc_root;
 	if (!desc)
 		return;
 
@@ -293,7 +285,7 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 
 	//bpf_spin_lock(&sdt_task_lock);
 
-	desc = sdt_task_desc_root.root;
+	desc = sdt_task_desc_root;
 
 	/*
 	 * Do the third level. As the full bit is not set, we know there must be
