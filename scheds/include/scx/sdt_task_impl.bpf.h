@@ -7,7 +7,7 @@
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 1 << 8); /* number of pages */
+	__uint(max_entries, 1 << 15); /* number of pages */
         __ulong(map_extra, (1ull << 44)); /* start of mmap() region */
 } arena __weak SEC(".maps");
 
@@ -27,7 +27,34 @@ struct {
 	__type(value, struct sdt_task_map_val);
 } sdt_task_map SEC(".maps");
 
-static struct sdt_task_desc * __arena *sdt_task_desc_root; /* radix tree root */
+/* radix tree root */
+struct sdt_task_root {
+	struct sdt_task_desc __arena *root;
+};
+
+/*
+ * XXX Hack to get the verifier to find the arena for sdt_exit_task
+ * As of 6.12-rc5, The verifier associates arenas with programs by
+ * checking LD.IMM instruction operands for an arena and populating
+ * the program state with the first instance it finds. This requires
+ * accessing our global arena variable, but scx methods do not necessarily
+ * do so while still using pointers from that arena. Insert a bpf_printk
+ * statement that triggers at most once to generate an LD.IMM instruction
+ * to access the arena and help the verifier.
+ */
+static bool sdt_verify_once;
+
+static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
+{
+
+	if (sdt_verify_once)
+		return;
+
+	bpf_printk("Kernel pointer to arena is %p\n", &arena);
+	sdt_verify_once = true;
+}
+
+static struct sdt_task_root sdt_task_desc_root;
 static struct sdt_task_desc __arena *sdt_task_new_chunk; /* new chunk cache */
 static __u64 __arena sdt_task_data_size; /* requested per-task data size */
 
@@ -112,30 +139,29 @@ void sdt_task_free_to_pool(void __arena *ptr, struct sdt_task_pool __arena *pool
 }
 
 /* alloc desc and chunk and link chunk to desc and return desc */
-static SDT_TASK_FN_ATTRS struct sdt_task_desc __arena *sdt_alloc_chunk(void)
+static SDT_TASK_FN_ATTRS int __arena sdt_alloc_chunk(void)
 {
-	struct sdt_task_desc __arena *desc, __arena *kdesc;
 	struct sdt_task_chunk __arena *chunk;
+	struct sdt_task_desc __arena *desc;
 
 	chunk = sdt_task_alloc_from_pool(&sdt_task_chunk_pool);
 	if (!chunk)
-		return NULL;
+		return -ENOMEM;
 
 	desc = sdt_task_alloc_from_pool(&sdt_task_desc_pool);
 	if (!desc) {
 		sdt_task_free_to_pool(chunk, &sdt_task_chunk_pool);
-		return NULL;
+		return -ENOMEM;
 	}
 
-	/* Back up the arena pointer before clobbering it so we can return it. */
-	kdesc = desc;
+	sdt_task_desc_root.root = desc;
 
 	cast_kern(desc);
 
 	desc->nr_free = SDT_TASK_ENTS_PER_CHUNK;
 	desc->chunk = chunk;
 
-	return kdesc;
+	return 0;
 }
 
 static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *desc)
@@ -166,8 +192,8 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *
 /* initialize the whole thing, maybe misnomer */
 static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 {
-	struct sdt_task_desc __arena *desc;
 	sdt_task_data_size = data_size;
+	int ret;
 
 	data_size = div_round_up(data_size, 8) * 8;
 	data_size += sizeof(struct sdt_task_data);
@@ -177,11 +203,9 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 
 	sdt_task_data_pool.elem_size = data_size;
 
-	desc = sdt_alloc_chunk();
-	if (!desc)
-		return -ENOMEM;
-
-	*sdt_task_desc_root = desc;
+	ret = sdt_alloc_chunk();
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -197,13 +221,17 @@ static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc *desc, int 
 
 static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 {
-	struct sdt_task_desc __arena *desc = *sdt_task_desc_root;
+	struct sdt_task_desc __arena *desc;
 	struct sdt_task_chunk __arena *chunk;
 	struct sdt_task_data __arena *data;
 	int i;
 
 	//bpf_spin_lock(&sdt_task_lock);
 
+	if (!sdt_task_desc_root.root)
+		return;
+
+	desc = sdt_task_desc_root.root;
 	if (!desc)
 		return;
 
@@ -240,6 +268,8 @@ static SDT_TASK_FN_ATTRS void sdt_task_free(struct task_struct *p)
 {
 	struct sdt_task_map_val *mval;
 
+	sdt_arena_verify();
+
 	mval = bpf_task_storage_get(&sdt_task_map, p, 0, 0);
 	if (!mval)
 		return;
@@ -263,7 +293,7 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 
 	//bpf_spin_lock(&sdt_task_lock);
 
-	desc = *sdt_task_desc_root;
+	desc = sdt_task_desc_root.root;
 
 	/*
 	 * Do the third level. As the full bit is not set, we know there must be
