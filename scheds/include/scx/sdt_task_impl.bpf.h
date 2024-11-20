@@ -102,7 +102,7 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 
 	bpf_spin_unlock(&sdt_task_pool_alloc_lock);
 
-	new_page = bpf_arena_alloc_pages(&arena, NULL, 64, NUMA_NO_NODE, 0);
+	new_page = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
 	if (!new_page)
 		return NULL;
 
@@ -111,7 +111,8 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 	 * satisfy the allocation.
 	 */
 
-	numelems = (64 * PAGE_SIZE) / pool->elem_size;
+	numelems = PAGE_SIZE / pool->elem_size;
+
 	bpf_for(u, 0, numelems - 1) {
 		new_elem = new_page + u * pool->elem_size;
 
@@ -187,11 +188,11 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *
 /* initialize the whole thing, maybe misnomer */
 static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 {
-	sdt_task_data_size = data_size;
 	int ret;
 
-	data_size = div_round_up(data_size, 8) * 8;
-	data_size += sizeof(struct sdt_task_data);
+	sdt_task_data_size = data_size;
+
+	data_size += data_size + sizeof(struct sdt_task_data);
 
 	if (data_size > PAGE_SIZE)
 		return -E2BIG;
@@ -249,6 +250,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 		.tptr = 0,
 	};
 
+	/* Zero out one word at a time. */
 	bpf_for(i, 0, sdt_task_data_size / 8) {
 		data->data[i] = 0;
 	}
@@ -289,11 +291,6 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 
 	desc = sdt_task_desc_root;
 
-	/*
-	 * Do the third level. As the full bit is not set, we know there must be
-	 * at least one slot available and we can claim that slot and populate
-	 * it if necessary. No need to back out and retry.
-	 */
 	pos = sdt_task_find_empty(desc);
 	if (pos < 0)
 		goto out_unlock;
@@ -309,21 +306,20 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 	data = chunk->data[pos];
 	if (!data) {
 		bpf_spin_unlock(&sdt_task_lock);
+
 		data = sdt_task_alloc_from_pool(&sdt_task_data_pool);
-		if (!data)
+		if (!data) {
 			sdt_task_free_idx(pos);
+			return NULL;
+		}
+
 		bpf_spin_lock(&sdt_task_lock);
-		if (!data)
-			goto out_unlock;
-
-		cast_kern(data);
-
-		data->tid.idx = pos;
 		chunk->data[pos] = data;
 	}
 
 	/* init and return */
 	cast_kern(data);
+	data->tid.idx = pos;
 	data->tptr = (__u64)p;
 
 	mval->tid = data->tid;
