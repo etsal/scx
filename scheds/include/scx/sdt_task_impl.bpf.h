@@ -221,11 +221,13 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 	struct sdt_task_data __arena *data;
 	int i;
 
-	//bpf_spin_lock(&sdt_task_lock);
+	bpf_spin_lock(&sdt_task_lock);
 
 	desc = sdt_task_desc_root;
-	if (!desc)
+	if (!desc) {
+		bpf_spin_unlock(&sdt_task_lock);
 		return;
+	}
 
 	cast_kern(desc);
 
@@ -252,7 +254,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 	}
 
 done:
-	//bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_task_lock);
 	return;
 }
 
@@ -283,7 +285,7 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 	if (!mval)
 		return NULL;
 
-	//bpf_spin_lock(&sdt_task_lock);
+	bpf_spin_lock(&sdt_task_lock);
 
 	desc = sdt_task_desc_root;
 
@@ -306,11 +308,11 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 	/* populate leaf node if necessary */
 	data = chunk->data[pos];
 	if (!data) {
-		//bpf_spin_unlock(&sdt_task_lock);
+		bpf_spin_unlock(&sdt_task_lock);
 		data = sdt_task_alloc_from_pool(&sdt_task_data_pool);
 		if (!data)
 			sdt_task_free_idx(pos);
-		//bpf_spin_lock(&sdt_task_lock);
+		bpf_spin_lock(&sdt_task_lock);
 		if (!data)
 			goto out_unlock;
 
@@ -328,7 +330,7 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 	mval->data = data;
 
 out_unlock:
-	//bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_task_lock);
 
 	return data;
 }
