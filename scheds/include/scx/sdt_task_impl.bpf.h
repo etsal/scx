@@ -7,7 +7,7 @@
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 1 << 15); /* number of pages */
+	__uint(max_entries, 1 << 20); /* number of pages */
 #ifdef __TARGET_ARCH_arm64
         __ulong(map_extra, (1ull << 32)); /* start of mmap() region */
 #else
@@ -53,7 +53,8 @@ static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
 	sdt_verify_once = true;
 }
 
-struct sdt_task_desc __arena *sdt_task_desc_root;
+
+static struct sdt_task_desc __arena *sdt_task_desc_root; /* radix tree root */
 static struct sdt_task_desc __arena *sdt_task_new_chunk; /* new chunk cache */
 static __u64 __arena sdt_task_data_size; /* requested per-task data size */
 
