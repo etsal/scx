@@ -41,6 +41,14 @@
 
 /* emit instruction:
  * rX = rX .off = BPF_ADDR_SPACE_CAST .imm32 = (dst_as << 16) | src_as
+ *
+ * This is a workaround for LLVM compiler versions without
+ * __BPF_FEATURE_ADDR_SPACE_CAST that do not automatically cast between arena
+ * pointers and native kernel/userspace ones. In this case we explicitly do so
+ * with cast_kern() and cast_user(). E.g., in the Linux kernel tree,
+ * tools/testing/selftests/bpf includes tests that use these macros to implement
+ * linked lists and hashtables backed by arena memory. In sched_ext, we use
+ * cast_kern() and cast_user() for compatibility with older LLVM toolchains.
  */
 #ifndef bpf_addr_space_cast
 #define bpf_addr_space_cast(var, dst_as, src_as)\
