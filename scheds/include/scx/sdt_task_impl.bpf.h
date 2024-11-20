@@ -67,6 +67,43 @@ struct sdt_task_pool __arena sdt_task_chunk_pool = {
 
 struct sdt_task_pool __arena sdt_task_data_pool;
 
+static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
+{
+	unsigned int num = 0;
+
+	if ((word & 0xffffffff) == 0) {
+		num += 32;
+		word >>= 32;
+	}
+
+	if ((word & 0xffff) == 0) {
+		num += 16;
+		word >>= 16;
+	}
+
+	if ((word & 0xff) == 0) {
+		num += 8;
+		word >>= 8;
+	}
+
+	if ((word & 0xf) == 0) {
+		num += 4;
+		word >>= 4;
+	}
+
+	if ((word & 0x3) == 0) {
+		num += 2;
+		word >>= 2;
+	}
+
+	if ((word & 0x1) == 0) {
+		num += 1;
+		word >>= 1;
+	}
+
+	return num;
+}
+
 /* find the first empty slot */
 static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena *desc)
 {
@@ -74,9 +111,11 @@ static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena 
 
 	cast_kern(desc);
 
-	for (i = 0; i < SDT_TASK_ENTS_PER_CHUNK; i++) {
-		if (!desc->allocated[i])
-			return i;
+	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
+		if (desc->allocated[i] == ~0ULL)
+			continue;
+
+		return (i * 64) + sdt_ffs(~desc->allocated[i]);
 	}
 
 	return -EBUSY;
@@ -177,7 +216,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_chunk(struct sdt_task_desc __arena *
 	sdt_task_free_to_pool(desc->chunk, &sdt_task_chunk_pool);
 
 	bpf_for(i, 0, SDT_TASK_ENTS_PER_CHUNK) {
-		desc->allocated[i] = false;
+		desc->allocated[i] = (__u64)0;
 	}
 
 	desc->nr_free = 0;
@@ -206,13 +245,19 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	return 0;
 }
 
-static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc *desc, int idx, bool state)
+static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc *desc, __u64 pos, bool state)
 {
-	bool __arena *allocated = (bool *)desc->allocated;
+	__u64 __arena *allocated = (__u64 *)desc->allocated;
+	__u64 mask;
 
 	cast_kern(allocated);
 
-	allocated[idx] = state;
+	mask = (__u64)1 << (pos % 64);
+
+	if (state)
+		allocated[pos / 64] |= mask;
+	else
+		allocated[pos / 64] &= ~mask;
 }
 
 static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)

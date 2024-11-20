@@ -10,6 +10,7 @@
 enum sdt_task_consts {
 	SDT_TASK_ENTS_PER_CHUNK_SHIFT	= 9,
 	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT,
+	SDT_TASK_CHUNK_BITMAP_U64S	= div_round_up(SDT_TASK_ENTS_PER_CHUNK, 64),
 };
 
 union sdt_task_id {
@@ -28,7 +29,7 @@ struct sdt_task_chunk;
  * which makes indexing cheaper.
  */
 struct sdt_task_desc {
-	bool				allocated[SDT_TASK_ENTS_PER_CHUNK];
+	__u64				allocated[SDT_TASK_CHUNK_BITMAP_U64S];
 	__u64				nr_free;
 	struct sdt_task_chunk __arena	*chunk;
 };
