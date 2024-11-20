@@ -28,6 +28,7 @@ use bitvec::prelude::*;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use lazy_static::lazy_static;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -43,6 +44,7 @@ use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
+use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -52,6 +54,7 @@ use scx_utils::uei_report;
 use scx_utils::Cache;
 use scx_utils::CoreType;
 use scx_utils::LoadAggregator;
+use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use stats::LayerStats;
@@ -74,108 +77,112 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 
-#[rustfmt::skip]
-lazy_static::lazy_static! {
+lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
-    static ref EXAMPLE_CONFIG: LayerConfig =
-	LayerConfig {
-            specs: vec![
-		LayerSpec {
-                    name: "batch".into(),
-                    comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
-                    matches: vec![
-			vec![LayerMatch::CgroupPrefix("system.slice/".into())],
-			vec![LayerMatch::NiceAbove(0)],
-                    ],
-                    kind: LayerKind::Confined {
-			cpus_range: Some((0, 16)),
-			util_range: (0.8, 0.9),
-			min_exec_us: 1000,
-			yield_ignore: 0.0,
-			preempt: false,
-			preempt_first: false,
-			exclusive: false,
-			idle_smt: false,
+    static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
+        specs: vec![
+            LayerSpec {
+                name: "batch".into(),
+                comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
+                matches: vec![
+                    vec![LayerMatch::CgroupPrefix("system.slice/".into())],
+                    vec![LayerMatch::NiceAbove(0)],
+                ],
+                kind: LayerKind::Confined {
+                    util_range: (0.8, 0.9),
+                    cpus_range: Some((0, 16)),
+                    common: LayerCommon {
+                        min_exec_us: 1000,
+                        yield_ignore: 0.0,
+                        preempt: false,
+                        preempt_first: false,
+                        exclusive: false,
+                        idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
-			perf: 1024,
-			nodes: vec![],
-			llcs: vec![],
+                        perf: 1024,
+                        nodes: vec![],
+                        llcs: vec![],
                     },
-		},
-		LayerSpec {
-                    name: "immediate".into(),
-                    comment: Some("tasks under workload.slice with nice value < 0".into()),
-                    matches: vec![vec![
-			LayerMatch::CgroupPrefix("workload.slice/".into()),
-			LayerMatch::NiceBelow(0),
-                    ]],
-                    kind: LayerKind::Open {
-			min_exec_us: 100,
-			yield_ignore: 0.25,
-			preempt: true,
-			preempt_first: false,
-			exclusive: true,
-			idle_smt: false,
+                },
+            },
+            LayerSpec {
+                name: "immediate".into(),
+                comment: Some("tasks under workload.slice with nice value < 0".into()),
+                matches: vec![vec![
+                    LayerMatch::CgroupPrefix("workload.slice/".into()),
+                    LayerMatch::NiceBelow(0),
+                ]],
+                kind: LayerKind::Open {
+                    common: LayerCommon {
+                        min_exec_us: 100,
+                        yield_ignore: 0.25,
+                        preempt: true,
+                        preempt_first: false,
+                        exclusive: true,
+                        idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
-			perf: 1024,
-			nodes: vec![],
-			llcs: vec![],
+                        perf: 1024,
+                        nodes: vec![],
+                        llcs: vec![],
                     },
-		},
-		LayerSpec {
-                    name: "stress-ng".into(),
-                    comment: Some("stress-ng test layer".into()),
-                    matches: vec![vec![
-			LayerMatch::CommPrefix("stress-ng".into()),
-                    ],
-                    vec![
-			LayerMatch::PcommPrefix("stress-ng".into()),
-                    ]],
-                    kind: LayerKind::Confined {
-			cpus_range: None,
-			min_exec_us: 800,
-			yield_ignore: 0.0,
-			util_range: (0.2, 0.8),
-			preempt: true,
-			preempt_first: false,
-			exclusive: false,
-			idle_smt: false,
+                },
+            },
+            LayerSpec {
+                name: "stress-ng".into(),
+                comment: Some("stress-ng test layer".into()),
+                matches: vec![
+                    vec![LayerMatch::CommPrefix("stress-ng".into()),],
+                    vec![LayerMatch::PcommPrefix("stress-ng".into()),]
+                ],
+                kind: LayerKind::Confined {
+                    cpus_range: None,
+                    util_range: (0.2, 0.8),
+                    common: LayerCommon {
+                        min_exec_us: 800,
+                        yield_ignore: 0.0,
+                        preempt: true,
+                        preempt_first: false,
+                        exclusive: false,
+                        idle_smt: false,
                         slice_us: 800,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Topo,
-			perf: 1024,
-			nodes: vec![],
-			llcs: vec![],
+                        perf: 1024,
+                        nodes: vec![],
+                        llcs: vec![],
                     },
-		},
-		LayerSpec {
-                    name: "normal".into(),
-                    comment: Some("the rest".into()),
-                    matches: vec![vec![]],
-                    kind: LayerKind::Grouped {
-			cpus_range: None,
-			util_range: (0.5, 0.6),
-			min_exec_us: 200,
-			yield_ignore: 0.0,
-			preempt: false,
-			preempt_first: false,
-			exclusive: false,
-			idle_smt: false,
+                },
+            },
+            LayerSpec {
+                name: "normal".into(),
+                comment: Some("the rest".into()),
+                matches: vec![vec![]],
+                kind: LayerKind::Grouped {
+                    cpus_range: None,
+                    util_range: (0.5, 0.6),
+                    common: LayerCommon {
+                        min_exec_us: 200,
+                        yield_ignore: 0.0,
+                        preempt: false,
+                        preempt_first: false,
+                        exclusive: false,
+                        idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Linear,
-			perf: 1024,
-			nodes: vec![],
-			llcs: vec![],
+                        perf: 1024,
+                        nodes: vec![],
+                        llcs: vec![],
                     },
-		},
-            ],
-	};
+                },
+            },
+        ],
+    };
 }
 
 /// scx_layered: A highly configurable multi-layer sched_ext scheduler
@@ -457,6 +464,22 @@ struct Opts {
     /// Run with example layer specifications (useful for e.g. CI pipelines)
     #[clap(long)]
     run_example: bool,
+
+    /// Enables iteration over local LLCs first for dispatch.
+    #[clap(long, default_value = "false")]
+    local_llc_iteration: bool,
+
+    /// Disable antistall
+    #[clap(long, default_value = "false")]
+    disable_antistall: bool,
+
+    /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
+    #[clap(long, default_value = "false")]
+    netdev_irq_balance: bool,
+
+    /// Maximum task runnable_at delay (in seconds) before antistall turns on
+    #[clap(long, default_value = "3")]
+    antistall_sec: u64,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -911,8 +934,7 @@ impl Layer {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
-                nodes,
-                llcs,
+                common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
                 let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
@@ -950,7 +972,14 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            LayerKind::Grouped { nodes, llcs, .. } | LayerKind::Open { nodes, llcs, .. } => {
+            LayerKind::Grouped {
+                common: LayerCommon { nodes, llcs, .. },
+                ..
+            }
+            | LayerKind::Open {
+                common: LayerCommon { nodes, llcs, .. },
+                ..
+            } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
                     allowed_cpus.fill(true);
                 } else {
@@ -975,23 +1004,13 @@ impl Layer {
             }
         }
 
-        let layer_growth_algo = match &kind {
-            LayerKind::Confined { growth_algo, .. }
-            | LayerKind::Grouped { growth_algo, .. }
-            | LayerKind::Open { growth_algo, .. } => growth_algo.clone(),
-        };
-        let preempt = match &kind {
-            LayerKind::Confined { preempt, .. }
-            | LayerKind::Grouped { preempt, .. }
-            | LayerKind::Open { preempt, .. } => preempt.clone(),
-        };
+        let layer_growth_algo = kind.common().growth_algo.clone();
+        let preempt = kind.common().preempt;
 
         let core_order = layer_growth_algo.layer_core_order(cpu_pool, spec, idx, topo);
         debug!(
             "layer: {} algo: {:?} core order: {:?}",
-            name,
-            layer_growth_algo.clone(),
-            core_order
+            name, &layer_growth_algo, core_order
         );
 
         Ok(Self {
@@ -1202,6 +1221,8 @@ struct Scheduler<'a> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
+    topo: Topology,
+    netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
 }
 
@@ -1277,8 +1298,8 @@ impl<'a> Scheduler<'a> {
             layer.nr_match_ors = spec.matches.len() as u32;
             layer.kind = spec.kind.as_bpf_enum();
 
-            match &spec.kind {
-                LayerKind::Confined {
+            {
+                let LayerCommon {
                     min_exec_us,
                     yield_ignore,
                     perf,
@@ -1291,70 +1312,42 @@ impl<'a> Scheduler<'a> {
                     slice_us,
                     weight,
                     ..
-                }
-                | LayerKind::Grouped {
-                    min_exec_us,
-                    yield_ignore,
-                    perf,
-                    preempt,
-                    preempt_first,
-                    exclusive,
-                    idle_smt,
-                    growth_algo,
-                    nodes,
-                    slice_us,
-                    weight,
-                    ..
-                }
-                | LayerKind::Open {
-                    min_exec_us,
-                    yield_ignore,
-                    perf,
-                    preempt,
-                    preempt_first,
-                    exclusive,
-                    idle_smt,
-                    growth_algo,
-                    nodes,
-                    slice_us,
-                    weight,
-                    ..
-                } => {
-                    layer.slice_ns = if *slice_us > 0 {
-                        *slice_us * 1000
-                    } else {
-                        opts.slice_us * 1000
-                    };
-                    layer.min_exec_ns = min_exec_us * 1000;
-                    layer.yield_step_ns = if *yield_ignore > 0.999 {
-                        0
-                    } else if *yield_ignore < 0.001 {
-                        layer.slice_ns
-                    } else {
-                        (layer.slice_ns as f64 * (1.0 - *yield_ignore)) as u64
-                    };
-                    let mut layer_name: String = spec.name.clone();
-                    layer_name.truncate(MAX_LAYER_NAME);
-                    copy_into_cstr(&mut layer.name, layer_name.as_str());
-                    layer.preempt.write(*preempt);
-                    layer.preempt_first.write(*preempt_first);
-                    layer.exclusive.write(*exclusive);
-                    layer.idle_smt.write(*idle_smt);
-                    layer.growth_algo = growth_algo.as_bpf_enum();
-                    layer.weight = if *weight <= MAX_LAYER_WEIGHT && *weight >= MIN_LAYER_WEIGHT {
-                        *weight
-                    } else {
-                        DEFAULT_LAYER_WEIGHT
-                    };
-                    layer_weights.push(layer.weight.try_into().unwrap());
-                    layer.perf = u32::try_from(*perf)?;
-                    layer.node_mask = nodemask_from_nodes(nodes) as u64;
-                    for topo_node in topo.nodes() {
-                        if !nodes.contains(&topo_node.id()) {
-                            continue;
-                        }
-                        layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs()) as u64;
+                } = spec.kind.common();
+
+                layer.slice_ns = if *slice_us > 0 {
+                    *slice_us * 1000
+                } else {
+                    opts.slice_us * 1000
+                };
+                layer.min_exec_ns = min_exec_us * 1000;
+                layer.yield_step_ns = if *yield_ignore > 0.999 {
+                    0
+                } else if *yield_ignore < 0.001 {
+                    layer.slice_ns
+                } else {
+                    (layer.slice_ns as f64 * (1.0 - *yield_ignore)) as u64
+                };
+                let mut layer_name: String = spec.name.clone();
+                layer_name.truncate(MAX_LAYER_NAME);
+                copy_into_cstr(&mut layer.name, layer_name.as_str());
+                layer.preempt.write(*preempt);
+                layer.preempt_first.write(*preempt_first);
+                layer.exclusive.write(*exclusive);
+                layer.idle_smt.write(*idle_smt);
+                layer.growth_algo = growth_algo.as_bpf_enum();
+                layer.weight = if *weight <= MAX_LAYER_WEIGHT && *weight >= MIN_LAYER_WEIGHT {
+                    *weight
+                } else {
+                    DEFAULT_LAYER_WEIGHT
+                };
+                layer_weights.push(layer.weight.try_into().unwrap());
+                layer.perf = u32::try_from(*perf)?;
+                layer.node_mask = nodemask_from_nodes(nodes) as u64;
+                for topo_node in topo.nodes() {
+                    if !nodes.is_empty() && !nodes.contains(&topo_node.id()) {
+                        continue;
                     }
+                    layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs()) as u64;
                 }
             }
 
@@ -1411,23 +1404,37 @@ impl<'a> Scheduler<'a> {
         open_object: &'a mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
-        let topo = Topology::new()?;
-        let cpu_pool = CpuPool::new(&topo)?;
+        let mut disable_topology = opts.disable_topology.unwrap_or(false);
 
-        let disable_topology = if let Some(val) = opts.disable_topology {
-            val
+        let topo = if disable_topology {
+            Topology::with_flattened_llc_node()?
         } else {
-            let val = if topo.nodes().len() > 1 {
-                false
-            } else {
-                topo.nodes().iter().all(|n| n.llcs().len() <= 1)
+            Topology::new()?
+        };
+        let netdevs = if opts.netdev_irq_balance {
+            warn!(
+                "Experimental netdev IRQ balancing enabled. Reset IRQ masks of network devices after use!!!"
+            );
+            read_netdevs()?
+        } else {
+            BTreeMap::new()
+        };
+
+        if !disable_topology {
+            if topo.nodes().len() == 1 && topo.nodes()[0].llcs().len() == 1 {
+                disable_topology = true;
             };
             info!(
                 "Topology awareness not specified, selecting {} based on hardware",
-                if val { "disabled" } else { "enabled" }
+                if disable_topology {
+                    "disabled"
+                } else {
+                    "enabled"
+                }
             );
-            val
         };
+
+        let cpu_pool = CpuPool::new(&topo)?;
 
         // If disabling topology awareness clear out any set NUMA/LLC configs and
         // it will fallback to using all cores.
@@ -1437,14 +1444,8 @@ impl<'a> Scheduler<'a> {
                 .into_iter()
                 .cloned()
                 .map(|mut s| {
-                    match &mut s.kind {
-                        LayerKind::Confined { nodes, llcs, .. }
-                        | LayerKind::Open { nodes, llcs, .. }
-                        | LayerKind::Grouped { nodes, llcs, .. } => {
-                            nodes.truncate(0);
-                            llcs.truncate(0);
-                        }
-                    };
+                    s.kind.common_mut().nodes.clear();
+                    s.kind.common_mut().llcs.clear();
                     s
                 })
                 .collect()
@@ -1486,8 +1487,13 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
+        skel.maps.rodata_data.local_llc_iteration = opts.local_llc_iteration;
+        skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
             skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
+        }
+        if opts.disable_antistall {
+            skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
         }
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
@@ -1539,6 +1545,8 @@ impl<'a> Scheduler<'a> {
             proc_reader,
             skel,
 
+            topo,
+            netdevs,
             stats_server,
         };
 
@@ -1556,6 +1564,43 @@ impl<'a> Scheduler<'a> {
             }
         }
         bpf_layer.refresh_cpus = 1;
+    }
+
+    fn update_netdev_cpumasks(&mut self) -> Result<()> {
+        let available_cpus = self.cpu_pool.available_cpus();
+        if available_cpus.is_empty() {
+            return Ok(());
+        }
+
+        for (iface, netdev) in self.netdevs.iter_mut() {
+            let node = self
+                .topo
+                .nodes()
+                .into_iter()
+                .take_while(|n| n.id() == netdev.node())
+                .next()
+                .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
+            let node_cpus = node.span();
+            for (irq, irqmask) in netdev.irqs.iter_mut() {
+                irqmask.clear();
+                for cpu in available_cpus.iter_ones() {
+                    if !node_cpus.test_cpu(cpu) {
+                        continue;
+                    }
+                    let _ = irqmask.set_cpu(cpu);
+                }
+                // If no CPUs are available in the node then spread the load across the node
+                if irqmask.weight() == 0 {
+                    for cpu in node_cpus.as_raw_bitvec().iter_ones() {
+                        let _ = irqmask.set_cpu(cpu);
+                    }
+                }
+                trace!("{} updating irq {} cpumask {:?}", iface, irq, irqmask);
+            }
+            netdev.apply_cpumasks()?;
+        }
+
+        Ok(())
     }
 
     fn set_bpf_layer_preemption(layer: &mut Layer, bpf_layer: &mut types::layer, preempt: bool) {
@@ -1672,6 +1717,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        let _ = self.update_netdev_cpumasks();
         Ok(())
     }
 

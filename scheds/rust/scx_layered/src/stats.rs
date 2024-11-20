@@ -25,7 +25,6 @@ use serde::Serialize;
 use crate::bpf_intf;
 use crate::BpfStats;
 use crate::Layer;
-use crate::LayerKind;
 use crate::Stats;
 
 fn fmt_pct(v: f64) -> String {
@@ -174,12 +173,6 @@ impl LayerStats {
             if b != 0.0 { a / b * 100.0 } else { 0.0 }
         };
 
-        let is_excl = match &layer.kind {
-            LayerKind::Confined { exclusive, .. }
-            | LayerKind::Grouped { exclusive, .. }
-            | LayerKind::Open { exclusive, .. } => *exclusive,
-        } as u32;
-
         Self {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
@@ -206,7 +199,7 @@ impl LayerStats {
             keep: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP),
             keep_fail_max_exec: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC),
             keep_fail_busy: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY),
-            is_excl,
+            is_excl: layer.kind.common().exclusive as u32,
             excl_collision: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
             excl_preempt: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
             kick: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK),
@@ -228,15 +221,22 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/dcycle/frac/{:5.1}/{:5.1}/{:7.1} load/load_frac_adj/frac={:9.2}/{:2.2}/{:5.1} tasks={:6}",
+            "  {:<width$}: util/dcycle/frac={:5.1}/{:5.1}/{:7.1} tasks={:6}",
             name,
             self.util,
             self.dcycle,
             self.util_frac,
+            self.tasks,
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  load/load_frac_adj/frac={:9.2}/{:2.2}/{:5.1}",
+            "",
             self.load,
             self.load_frac_adj,
             self.load_frac,
-            self.tasks,
             width = header_width,
         )?;
 
@@ -288,7 +288,7 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{} min_exec={}/{:7.2}ms, slice={}ms",
+            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{}",
             "",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
@@ -296,10 +296,17 @@ impl LayerStats {
             fmt_pct(self.preempt_xnuma),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  slice={}ms min_exec={}/{:7.2}ms",
+            "",
+            self.slice_us as f64 / 1000.0,
             fmt_pct(self.min_exec),
             self.min_exec_us as f64 / 1000.0,
-            self.slice_us as f64 / 1000.0,
-            width = header_width,
+            width = header_width
         )?;
 
         let mut cpus = self
