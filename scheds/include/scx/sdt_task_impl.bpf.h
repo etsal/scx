@@ -244,6 +244,7 @@ static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc *desc, __u6
 static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 {
 	struct sdt_task_desc __arena *lv_desc[SDT_TASK_LEVELS];
+	struct sdt_task_desc * __arena *desc_children;
 	struct sdt_task_chunk __arena *chunk;
 	struct sdt_task_desc __arena *desc;
 	struct sdt_task_data __arena *data;
@@ -277,10 +278,12 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 		chunk = desc->chunk;
 		cast_kern(chunk);
 
-		desc = (struct sdt_task_desc *)chunk->descs;
+		desc_children = (struct sdt_task_desc * __arena *)chunk->descs;
+		desc = desc_children[pos];
+
 		if (!desc) {
 			bpf_spin_unlock(&sdt_task_lock);
-			bpf_printk("%s: Freeing nonexistent path\n", __func__);
+			bpf_printk("%s: Freeing nonexistent idx %lx\n", __func__, idx);
 			return;
 		}
 	}
