@@ -112,15 +112,17 @@ static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
 /* find the first empty slot */
 static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena *desc)
 {
+	__u64 freelist;
 	__u64 i;
 
 	cast_kern(desc);
 
 	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
-		if (desc->allocated[i] == ~0ULL)
+		freelist = ~desc->allocated[i];
+		if (freelist == 0)
 			continue;
 
-		return (i * 64) + sdt_ffs(~desc->allocated[i]);
+		return (i * 64) + sdt_ffs(freelist);
 	}
 
 	return -EBUSY;
