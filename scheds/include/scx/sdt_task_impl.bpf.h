@@ -110,7 +110,7 @@ static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
 }
 
 /* find the first empty slot */
-static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena *desc)
+static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty_chunk(struct sdt_task_desc __arena *desc)
 {
 	__u64 freelist;
 	__u64 i;
@@ -126,6 +126,11 @@ static SDT_TASK_FN_ATTRS __s64 sdt_task_find_empty(struct sdt_task_desc __arena 
 	}
 
 	return -EBUSY;
+}
+
+static SDT_TASK_FN_ATTRS struct sdt_task_desc __arena *sdt_task_find_empty(struct sdt_task_desc __arena *desc)
+{
+	return desc;
 }
 
 /* simple memory allocator */
@@ -342,9 +347,9 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 
 	bpf_spin_lock(&sdt_task_lock);
 
-	desc = sdt_task_desc_root;
+	desc = sdt_task_find_empty(sdt_task_desc_root);
 
-	pos = sdt_task_find_empty(desc);
+	pos = sdt_task_find_empty_chunk(desc);
 	if (pos < 0)
 		goto out_unlock;
 
