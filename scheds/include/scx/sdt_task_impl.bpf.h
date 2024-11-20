@@ -241,7 +241,7 @@ static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc *desc, __u6
 		allocated[pos / 64] &= ~bit;
 }
 
-static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
+static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 {
 	struct sdt_task_desc __arena *lv_desc[SDT_TASK_LEVELS];
 	struct sdt_task_chunk __arena *chunk;
@@ -268,13 +268,14 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 		lv_desc[level] = desc;
 		lv_pos[level] = pos;
 
+
+		if (level == SDT_TASK_LEVELS - 1)
+			break;
+
 		cast_kern(desc);
 
 		chunk = desc->chunk;
 		cast_kern(chunk);
-
-		if (level == SDT_TASK_LEVELS - 1)
-			break;
 
 		desc = (struct sdt_task_desc *)chunk->descs;
 		if (!desc) {
@@ -284,22 +285,12 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 		}
 	}
 
-	bpf_for(u, 0, SDT_TASK_LEVELS) {
-		level = SDT_TASK_LEVELS - 1 - u;
+	cast_kern(desc);
 
-		/* Only propagate upwards if we are the parent's only free chunk. */
-		desc = lv_desc[level];
-		cast_kern(desc);
+	chunk = desc->chunk;
+	cast_kern(chunk);
 
-		sdt_set_idx_state(desc, lv_pos[level], false);
-
-		desc->nr_free += 1;
-		if (desc->nr_free > 1)
-			break;
-	}
-
-	/* XXX Almost passing */
-#if 0
+	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
 		bpf_spin_unlock(&sdt_task_lock);
@@ -318,7 +309,20 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 	bpf_for(i, 0, sdt_task_data_size / 8) {
 		data->data[i] = 0;
 	}
-#endif
+
+	bpf_for(u, 0, SDT_TASK_LEVELS) {
+		level = SDT_TASK_LEVELS - 1 - u;
+
+		/* Only propagate upwards if we are the parent's only free chunk. */
+		desc = lv_desc[level];
+		cast_kern(desc);
+
+		sdt_set_idx_state(desc, lv_pos[level], false);
+
+		desc->nr_free += 1;
+		if (desc->nr_free > 1)
+			break;
+	}
 
 	bpf_spin_unlock(&sdt_task_lock);
 	return;
