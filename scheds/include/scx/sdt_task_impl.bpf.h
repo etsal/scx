@@ -233,15 +233,17 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 	cast_kern(desc);
 
 	sdt_set_idx_state(desc, idx, false);
+	desc->nr_free++;
 
 	chunk = desc->chunk;
 	cast_kern(chunk);
 
 	data = (struct sdt_task_data *)chunk->data;
-	if (!data)
-		goto done;
-
-	desc->nr_free++;
+	if (!data) {
+		bpf_spin_unlock(&sdt_task_lock);
+		bpf_printk("%s: Freeing idx without data\n", __func__);
+		return;
+	}
 
 	cast_kern(data);
 
@@ -255,7 +257,6 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(int idx)
 		data->data[i] = 0;
 	}
 
-done:
 	bpf_spin_unlock(&sdt_task_lock);
 	return;
 }
