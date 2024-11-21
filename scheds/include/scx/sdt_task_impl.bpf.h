@@ -110,7 +110,7 @@ static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
 }
 
 /* find the first empty slot */
-static SDT_TASK_FN_ATTRS __s64 sdt_chunk_find_empty(struct sdt_task_desc __arena *desc)
+static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(struct sdt_task_desc __arena *desc)
 {
 	__u64 freelist;
 	__u64 i;
@@ -119,13 +119,13 @@ static SDT_TASK_FN_ATTRS __s64 sdt_chunk_find_empty(struct sdt_task_desc __arena
 
 	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
 		freelist = ~desc->allocated[i];
-		if (freelist == 0)
+		if (freelist == (__u64)0)
 			continue;
 
 		return (i * 64) + sdt_ffs(freelist);
 	}
 
-	return -EBUSY;
+	return SDT_TASK_ENTS_PER_CHUNK;
 }
 
 /* simple memory allocator */
@@ -148,7 +148,7 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 
 	bpf_spin_unlock(&sdt_task_pool_alloc_lock);
 
-	new_page = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
+	new_page = bpf_arena_alloc_pages(&arena, NULL, SDT_TASK_ENT_PAGES, NUMA_NO_NODE, 0);
 	if (!new_page)
 		return NULL;
 
@@ -157,7 +157,7 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool __arena *pool)
 	 * satisfy the allocation.
 	 */
 
-	numelems = PAGE_SIZE / pool->elem_size;
+	numelems = (SDT_TASK_ENT_PAGES * PAGE_SIZE) / pool->elem_size;
 
 	bpf_for(u, 0, numelems - 1) {
 		new_elem = new_page + u * pool->elem_size;
@@ -214,7 +214,7 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 
 	data_size += data_size + sizeof(struct sdt_task_data);
 
-	if (data_size > PAGE_SIZE)
+	if (data_size > (SDT_TASK_ENT_PAGES * PAGE_SIZE))
 		return -E2BIG;
 
 	sdt_task_data_pool.elem_size = data_size;
@@ -226,9 +226,9 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	return 0;
 }
 
-static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc *desc, __u64 pos, bool state)
+static SDT_TASK_FN_ATTRS void sdt_set_idx_state(struct sdt_task_desc __arena *desc, __u64 pos, bool state)
 {
-	__u64 __arena *allocated = (__u64 *)desc->allocated;
+	__u64 __arena *allocated = desc->allocated;
 	__u64 bit;
 
 	cast_kern(allocated);
@@ -268,7 +268,6 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 
 		lv_desc[level] = desc;
 		lv_pos[level] = pos;
-
 
 		if (level == SDT_TASK_LEVELS - 1)
 			break;
@@ -318,9 +317,10 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 
 		/* Only propagate upwards if we are the parent's only free chunk. */
 		desc = lv_desc[level];
-		cast_kern(desc);
 
 		sdt_set_idx_state(desc, lv_pos[level], false);
+
+		cast_kern(desc);
 
 		desc->nr_free += 1;
 		if (desc->nr_free > 1)
@@ -358,7 +358,7 @@ static SDT_TASK_FN_ATTRS int sdt_task_find_empty(struct sdt_task_desc __arena *d
 
 	bpf_for(level, 0, SDT_TASK_LEVELS) {
 		pos = sdt_chunk_find_empty(desc);
-		if (pos < 0)
+		if (pos == SDT_TASK_ENTS_PER_CHUNK)
 			return -ENOMEM;
 
 		idx <<= SDT_TASK_ENTS_PER_CHUNK_SHIFT;
@@ -403,9 +403,10 @@ static SDT_TASK_FN_ATTRS int sdt_task_find_empty(struct sdt_task_desc __arena *d
 	bpf_for(u, 0, SDT_TASK_LEVELS) {
 		level = SDT_TASK_LEVELS - 1 - u;
 		tmp = lv_desc[level];
-		cast_kern(tmp);
 
 		sdt_set_idx_state(tmp, lv_pos[level], true);
+
+		cast_kern(tmp);
 
 		tmp->nr_free -= 1;
 		if (tmp->nr_free > 0)
@@ -442,6 +443,7 @@ static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct tas
 
 	if (ret != 0) {
 		bpf_spin_unlock(&sdt_task_lock);
+		bpf_printk("error %d on allocation", ret);
 		return NULL;
 	}
 
