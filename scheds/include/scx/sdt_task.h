@@ -1,7 +1,6 @@
 #pragma once
 
-#include "bpf_arena_common.h"
-#include "bpf_arena_list.h"
+#include "sdt_list.h"
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
@@ -9,13 +8,17 @@
 
 enum sdt_task_consts {
 	SDT_TASK_ALLOC_RESERVE		= 0xbeefcafe,
-	SDT_TASK_ENT_PAGE_SHIFT		= 3,
+	SDT_TASK_ENT_PAGE_SHIFT		= 0,
 	SDT_TASK_ENT_PAGES		= 1 << SDT_TASK_ENT_PAGE_SHIFT,
 	SDT_TASK_ENTS_PER_PAGE_SHIFT	= 9,
 	SDT_TASK_ALLOCATION_ATTEMPTS	= 8192,
 	SDT_TASK_LEVELS			= 3,
 	SDT_TASK_ENTS_PER_CHUNK_SHIFT	= SDT_TASK_ENT_PAGE_SHIFT + SDT_TASK_ENTS_PER_PAGE_SHIFT,
-	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT,
+	/*
+	 * Skim space off the chunk so that both the chunk and the
+	 * allocator linked list are included in the same arena page.
+	 */
+	SDT_TASK_ENTS_PER_CHUNK		= (1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT) - (16 * sizeof(struct arena_list_node)),
 	SDT_TASK_CHUNK_BITMAP_U64S	= div_round_up(SDT_TASK_ENTS_PER_CHUNK, 64),
 };
 
@@ -46,7 +49,7 @@ struct sdt_task_desc {
 struct sdt_task_data {
 	union sdt_task_id		tid;
 	__u64				tptr;
-	__u64				data[];
+	__u64				__arena data[];
 };
 
 /*
