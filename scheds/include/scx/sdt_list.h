@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
-/* Copyright (c) 2024 Meta Platforms, Inc. and affiliates. */
+/*
+ * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ */
 #pragma once
 #include "bpf_arena_common.h"
 
