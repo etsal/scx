@@ -392,6 +392,21 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 	return;
 }
 
+static SDT_TASK_FN_ATTRS
+void __arena *sdt_task_retrieve(struct task_struct *p)
+{
+	struct sdt_task_map_val *mval;
+
+	sdt_arena_verify();
+
+	mval = bpf_task_storage_get(&sdt_task_map, p, 0, 0);
+	if (!mval)
+		return NULL;
+
+	return (void __arena *)mval->data;
+}
+
+
 static SDT_TASK_FN_ATTRS void sdt_task_free(struct task_struct *p)
 {
 	struct sdt_task_map_val *mval;
@@ -490,7 +505,7 @@ int sdt_task_find_empty(struct sdt_task_desc __arena *desc, struct sdt_task_desc
 }
 
 static SDT_TASK_FN_ATTRS
-struct sdt_task_data __arena *sdt_task_alloc(struct task_struct *p)
+void __arena *sdt_task_alloc(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data = NULL;
 	struct sdt_task_desc __arena *desc;
@@ -551,5 +566,5 @@ struct sdt_task_data __arena *sdt_task_alloc(struct task_struct *p)
 
 	bpf_spin_unlock(&sdt_task_lock);
 
-	return data;
+	return (void __arena *)data->data;
 }
