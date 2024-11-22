@@ -51,7 +51,6 @@ static bool sdt_verify_once;
 
 static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
 {
-
 	if (sdt_verify_once)
 		return;
 
@@ -276,7 +275,8 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	return 0;
 }
 
-static SDT_TASK_FN_ATTRS int sdt_set_idx_state(struct sdt_task_desc __arena *desc, __u64 pos, bool state)
+static SDT_TASK_FN_ATTRS
+int sdt_set_idx_state(struct sdt_task_desc __arena *desc, __u64 pos, bool state)
 {
 	__u64 __arena *allocated = desc->allocated;
 	__u64 bit;
@@ -407,7 +407,8 @@ static SDT_TASK_FN_ATTRS void sdt_task_free(struct task_struct *p)
 }
 
 
-static SDT_TASK_FN_ATTRS int sdt_task_find_empty(struct sdt_task_desc __arena *desc, struct sdt_task_desc * __arena *descp, __u64 *idxp)
+static SDT_TASK_FN_ATTRS
+int sdt_task_find_empty(struct sdt_task_desc __arena *desc, struct sdt_task_desc * __arena *descp, __u64 *idxp)
 {
 	struct sdt_task_desc * __arena *desc_children,  __arena *new_chunk;
 	struct sdt_task_desc __arena *lv_desc[SDT_TASK_LEVELS];
@@ -488,7 +489,8 @@ static SDT_TASK_FN_ATTRS int sdt_task_find_empty(struct sdt_task_desc __arena *d
 	return 0;
 }
 
-static SDT_TASK_FN_ATTRS struct sdt_task_data __arena *sdt_task_alloc(struct task_struct *p)
+static SDT_TASK_FN_ATTRS
+struct sdt_task_data __arena *sdt_task_alloc(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data = NULL;
 	struct sdt_task_desc __arena *desc;
