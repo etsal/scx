@@ -10,14 +10,16 @@ UEI_DEFINE(uei);
 
 #define SHARED_DSQ 0
 
-static SDT_TASK_FN_ATTRS void
-stat_inc_enqueue(struct sdt_stats __arena *stats)
-{
-	cast_kern(stats);
-	stats->enqueue += 1;
-}
-__u64 stat_enqueue;
+#define DEFINE_SDT_STAT(metric)				\
+static SDT_TASK_FN_ATTRS void				\
+stat_inc_##metric(struct sdt_stats __arena *stats)	\
+{							\
+	cast_kern(stats);				\
+	stats->metric += 1;				\
+}							\
+__u64 stat_##metric;					\
 
+DEFINE_SDT_STAT(enqueue);
 
 static SDT_TASK_FN_ATTRS void
 stat_global_update(struct sdt_stats __arena *stats)
