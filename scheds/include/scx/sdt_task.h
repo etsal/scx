@@ -71,4 +71,5 @@ struct sdt_task_chunk {
 struct sdt_task_pool {
 	arena_list_head_t		head;
 	__u64				elem_size;
+	__u64				free_size;
 };

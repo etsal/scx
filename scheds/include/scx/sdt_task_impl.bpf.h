@@ -61,20 +61,13 @@ static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
 
 static struct sdt_task_desc __arena *sdt_task_desc_root; /* radix tree root */
 static struct sdt_task_desc __arena *sdt_task_new_chunk; /* new chunk cache */
-static __u64 __arena sdt_task_data_size; /* requested per-task data size */
 
 private(LOCK) struct bpf_spin_lock sdt_task_lock;
 private(POOL_LOCK) struct bpf_spin_lock sdt_task_pool_alloc_lock;
 
 /* allocation pools */
-struct sdt_task_pool __arena sdt_task_desc_pool = {
-	.elem_size			= sizeof(struct sdt_task_desc),
-};
-
-struct sdt_task_pool __arena sdt_task_chunk_pool = {
-	.elem_size			= sizeof(struct sdt_task_chunk),
-};
-
+struct sdt_task_pool __arena sdt_task_desc_pool;
+struct sdt_task_pool __arena sdt_task_chunk_pool;
 struct sdt_task_pool __arena sdt_task_data_pool;
 
 static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
@@ -245,12 +238,24 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_task_pool __arena *poo
 	return 0;
 }
 
-/* initialize the whole thing, maybe misnomer */
-static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
+static SDT_TASK_FN_ATTRS int sdt_pool_set_size_data(struct sdt_task_pool __arena *pool, __u64 data_size, __u64 free_size)
 {
 	int ret;
 
-	sdt_task_data_size = data_size;
+	ret = sdt_pool_set_size(pool, data_size);
+	if (ret)
+		return ret;
+
+	pool->free_size = free_size;
+
+	return 0;
+}
+
+/* initialize the whole thing, maybe misnomer */
+static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
+{
+	__u64 free_size;
+	int ret;
 
 	ret = sdt_pool_set_size(&sdt_task_chunk_pool, sizeof(struct sdt_task_chunk));
 	if (ret != 0)
@@ -260,11 +265,13 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	if (ret != 0)
 		return ret;
 
+	free_size = data_size;
+
 	/* Page align and wrap data into a descriptor. */
 	data_size += sizeof(struct sdt_task_data);
 	data_size = div_round_up(data_size, 8) * 8;
 
-	ret = sdt_pool_set_size(&sdt_task_data_pool, data_size);
+	ret = sdt_pool_set_size_data(&sdt_task_data_pool, data_size, free_size);
 	if (ret != 0)
 		return ret;
 
@@ -368,7 +375,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 	};
 
 	/* Zero out one word at a time. */
-	bpf_for(i, 0, sdt_task_data_size / 8) {
+	bpf_for(i, 0, sdt_task_data_pool.free_size / 8) {
 		data->data[i] = 0;
 	}
 
