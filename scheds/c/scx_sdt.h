@@ -1,5 +1,6 @@
 #pragma once
-struct sdt_task_stats {
-	int seq;
-	pid_t pid;
+struct sdt_stats {
+	int	seq;
+	pid_t	pid;
+	__u64	enqueue;
 };

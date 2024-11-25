@@ -10,18 +10,20 @@ UEI_DEFINE(uei);
 
 #define SHARED_DSQ 0
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(u64));
-	__uint(max_entries, 2);			/* [local, global] */
-} stats SEC(".maps");
-
-static void stat_inc(u32 idx)
+static SDT_TASK_FN_ATTRS void
+stat_inc_enqueue(struct sdt_stats __arena *stats)
 {
-	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx);
-	if (cnt_p)
-		(*cnt_p)++;
+	cast_kern(stats);
+	stats->enqueue += 1;
+}
+__u64 stat_enqueue;
+
+
+static SDT_TASK_FN_ATTRS void
+stat_global_update(struct sdt_stats __arena *stats)
+{
+	cast_kern(stats);
+	__sync_fetch_and_add(&stat_enqueue, stats->enqueue);
 }
 
 s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
@@ -31,7 +33,6 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		stat_inc(0);	/* count local queueing */
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 	}
 
@@ -40,7 +41,15 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 
 void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	stat_inc(1);	/* count global queueing */
+	struct sdt_stats __arena *stats;
+
+	stats = sdt_task_retrieve(p);
+	if (!stats) {
+		bpf_printk("%s: no stats for pid %d", p->pid);
+		return;
+	}
+
+	stat_inc_enqueue(stats);
 
 	scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 }
@@ -54,14 +63,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
 	struct sdt_task_data __arena *data;
-	struct sdt_task_stats __arena *stats;
+	struct sdt_stats __arena *stats;
 
 	data = sdt_task_alloc(p);
 	if (!data)
 		return -ENOMEM;
 
-	stats = (struct sdt_task_stats __arena *)data->data;
+	stats = (struct sdt_stats __arena *)data->data;
 	stats->pid = p->pid;
+	stats->enqueue = 0;
 
 	return 0;
 }
@@ -69,6 +79,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 			      struct scx_exit_task_args *args)
 {
+	struct sdt_stats __arena *stats;
+
+	stats = sdt_task_retrieve(p);
+	if (!stats) {
+		bpf_printk("%s: no stats for pid %d", p->pid);
+		return;
+	}
+
+	stat_global_update(stats);
+
 	sdt_task_free(p);
 }
 
@@ -76,7 +96,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
 	int ret;
 
-	ret = sdt_task_init(sizeof(struct sdt_task_stats));
+	ret = sdt_task_init(sizeof(struct sdt_stats));
 	if (ret < 0)
 		return ret;
 

@@ -402,6 +402,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 static SDT_TASK_FN_ATTRS
 void __arena *sdt_task_retrieve(struct task_struct *p)
 {
+	struct sdt_task_data __arena *data;
 	struct sdt_task_map_val *mval;
 
 	sdt_arena_verify();
@@ -410,7 +411,9 @@ void __arena *sdt_task_retrieve(struct task_struct *p)
 	if (!mval)
 		return NULL;
 
-	return (void __arena *)mval->data;
+	data = mval->data;
+
+	return (void __arena *)data->data;
 }
 
 
