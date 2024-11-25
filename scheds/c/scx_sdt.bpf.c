@@ -22,6 +22,8 @@ __u64 stat_##metric;					\
 DEFINE_SDT_STAT(enqueue);
 DEFINE_SDT_STAT(init);
 DEFINE_SDT_STAT(exit);
+DEFINE_SDT_STAT(select_idle_cpu);
+DEFINE_SDT_STAT(select_busy_cpu);
 
 static SDT_TASK_FN_ATTRS void
 stat_global_update(struct sdt_stats __arena *stats)
@@ -30,16 +32,28 @@ stat_global_update(struct sdt_stats __arena *stats)
 	__sync_fetch_and_add(&stat_enqueue, stats->enqueue);
 	__sync_fetch_and_add(&stat_init, stats->init);
 	__sync_fetch_and_add(&stat_exit, stats->exit);
+	__sync_fetch_and_add(&stat_select_idle_cpu, stats->select_idle_cpu);
+	__sync_fetch_and_add(&stat_select_busy_cpu, stats->select_busy_cpu);
 }
 
 s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	struct sdt_stats __arena *stats;
 	bool is_idle = false;
 	s32 cpu;
 
+	stats = sdt_task_retrieve(p);
+	if (!stats) {
+		bpf_printk("%s: no stats for pid %d", p->pid);
+		return 0;
+	}
+
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
+		stat_inc_select_idle_cpu(stats);
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+	} else {
+		stat_inc_select_busy_cpu(stats);
 	}
 
 	return cpu;

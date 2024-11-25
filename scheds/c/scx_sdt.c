@@ -73,6 +73,11 @@ restart:
 		printf("inits=%llu\t", skel->bss->stat_init);
 		printf("exits=%llu\t", skel->bss->stat_exit);
 		printf("\n");
+
+		printf("select_idle_cpu=%llu\t", skel->bss->stat_select_idle_cpu);
+		printf("select_busy_cpu=%llu\t", skel->bss->stat_select_busy_cpu);
+		printf("\n");
+
 		fflush(stdout);
 		sleep(1);
 	}
