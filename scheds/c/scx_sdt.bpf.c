@@ -2,15 +2,13 @@
 #include <scx/common.bpf.h>
 #include <scx/sdt_task_impl.bpf.h>
 
+#include "scx_sdt.h"
+
 char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
 #define SHARED_DSQ 0
-
-struct sdt_task_ctx {
-	int seq;
-};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -56,10 +54,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
 	struct sdt_task_data __arena *data;
+	struct sdt_task_stats __arena *stats;
 
 	data = sdt_task_alloc(p);
 	if (!data)
 		return -ENOMEM;
+
+	stats = (struct sdt_task_stats __arena *)data->data;
+	stats->pid = p->pid;
 
 	return 0;
 }
@@ -73,7 +75,8 @@ void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
 	int ret;
-	ret = sdt_task_init(sizeof(struct sdt_task_ctx));
+
+	ret = sdt_task_init(sizeof(struct sdt_task_stats));
 	if (ret < 0)
 		return ret;
 

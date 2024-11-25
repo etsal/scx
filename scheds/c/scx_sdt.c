@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2022 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
 #include <stdio.h>
@@ -12,6 +13,8 @@
 #include <scx/common.h>
 #include <scx/sdt_task.h>
 #include "scx_sdt.bpf.skel.h"
+
+#include "scx_sdt.h"
 
 const char help_fmt[] =
 "A simple sched_ext scheduler.\n"
