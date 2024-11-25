@@ -265,11 +265,10 @@ static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	if (ret != 0)
 		return ret;
 
-	free_size = data_size;
-
 	/* Page align and wrap data into a descriptor. */
-	data_size += sizeof(struct sdt_task_data);
 	data_size = div_round_up(data_size, 8) * 8;
+	free_size = data_size;
+	data_size += sizeof(struct sdt_task_data);
 
 	ret = sdt_pool_set_size_data(&sdt_task_data_pool, data_size, free_size);
 	if (ret != 0)
@@ -376,7 +375,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 
 	/* Zero out one word at a time. */
 	bpf_for(i, 0, sdt_task_data_pool.free_size / 8) {
-		data->data[i] = 0;
+		data->payload[i] = 0;
 	}
 
 	bpf_for(u, 0, SDT_TASK_LEVELS) {
@@ -413,7 +412,7 @@ void __arena *sdt_task_retrieve(struct task_struct *p)
 
 	data = mval->data;
 
-	return (void __arena *)data->data;
+	return (void __arena *)data->payload;
 }
 
 
@@ -576,5 +575,5 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 
 	bpf_spin_unlock(&sdt_task_lock);
 
-	return (void __arena *)data->data;
+	return (void __arena *)data->payload;
 }

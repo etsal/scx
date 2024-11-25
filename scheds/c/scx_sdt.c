@@ -69,7 +69,10 @@ restart:
 	link = SCX_OPS_ATTACH(skel, sdt_ops, scx_sdt);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
-		printf("enqueues=%llu\n", skel->bss->stat_enqueue);
+		printf("enqueues=%llu\t", skel->bss->stat_enqueue);
+		printf("inits=%llu\t", skel->bss->stat_init);
+		printf("exits=%llu\t", skel->bss->stat_exit);
+		printf("\n");
 		fflush(stdout);
 		sleep(1);
 	}

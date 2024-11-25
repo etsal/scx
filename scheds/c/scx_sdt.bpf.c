@@ -20,12 +20,16 @@ stat_inc_##metric(struct sdt_stats __arena *stats)	\
 __u64 stat_##metric;					\
 
 DEFINE_SDT_STAT(enqueue);
+DEFINE_SDT_STAT(init);
+DEFINE_SDT_STAT(exit);
 
 static SDT_TASK_FN_ATTRS void
 stat_global_update(struct sdt_stats __arena *stats)
 {
 	cast_kern(stats);
 	__sync_fetch_and_add(&stat_enqueue, stats->enqueue);
+	__sync_fetch_and_add(&stat_init, stats->init);
+	__sync_fetch_and_add(&stat_exit, stats->exit);
 }
 
 s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
@@ -64,16 +68,17 @@ void BPF_STRUCT_OPS(sdt_dispatch, s32 cpu, struct task_struct *prev)
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
-	struct sdt_task_data __arena *data;
 	struct sdt_stats __arena *stats;
 
-	data = sdt_task_alloc(p);
-	if (!data)
+	stats = sdt_task_alloc(p);
+	if (!stats) {
+		bpf_printk("arena allocator out of memory");
 		return -ENOMEM;
+	}
 
-	stats = (struct sdt_stats __arena *)data->data;
 	stats->pid = p->pid;
-	stats->enqueue = 0;
+
+	stat_inc_init(stats);
 
 	return 0;
 }
@@ -89,6 +94,7 @@ void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 		return;
 	}
 
+	stat_inc_exit(stats);
 	stat_global_update(stats);
 
 	sdt_task_free(p);
@@ -99,8 +105,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 	int ret;
 
 	ret = sdt_task_init(sizeof(struct sdt_stats));
-	if (ret < 0)
+	if (ret < 0) {
+		bpf_printk("sdt_init failed with %d", ret);
 		return ret;
+	}
 
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
