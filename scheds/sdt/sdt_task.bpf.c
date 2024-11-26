@@ -4,8 +4,6 @@
  * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
-#pragma once
-
 #include "sdt_task.h"
 
 #define SDT_TASK_FN_ATTRS	inline __attribute__((unused, always_inline))
