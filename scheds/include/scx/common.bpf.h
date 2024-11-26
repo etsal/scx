@@ -341,7 +341,7 @@ u32 bpf_cpumask_weight(const struct cpumask *cpumask) __ksym;
 /*
  * Access a cpumask in read-only mode (typically to check bits).
  */
-const struct cpumask *cast_mask(struct bpf_cpumask *mask) {
+const inline struct cpumask *cast_mask(struct bpf_cpumask *mask) {
   return (const struct cpumask *)mask;
 }
 
