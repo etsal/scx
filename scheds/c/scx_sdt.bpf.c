@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.h>
 
-#include "../sdt/sdt_task.bpf.c"
-
+#include "../sdt/sdt_task.h"
 #include "scx_sdt.h"
 
 char _license[] SEC("license") = "GPL";
@@ -12,7 +12,7 @@ UEI_DEFINE(uei);
 #define SHARED_DSQ 0
 
 #define DEFINE_SDT_STAT(metric)				\
-static SDT_TASK_FN_ATTRS void				\
+static inline void					\
 stat_inc_##metric(struct sdt_stats __arena *stats)	\
 {							\
 	cast_kern(stats);				\
@@ -26,7 +26,7 @@ DEFINE_SDT_STAT(exit);
 DEFINE_SDT_STAT(select_idle_cpu);
 DEFINE_SDT_STAT(select_busy_cpu);
 
-static SDT_TASK_FN_ATTRS void
+static inline void
 stat_global_update(struct sdt_stats __arena *stats)
 {
 	cast_kern(stats);

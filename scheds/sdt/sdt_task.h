@@ -73,3 +73,8 @@ struct sdt_task_pool {
 	__u64				elem_size;
 	__u64				free_size;
 };
+
+void __arena *sdt_task_retrieve(struct task_struct *p);
+int sdt_task_init(__u64 data_size);
+void __arena *sdt_task_alloc(struct task_struct *p);
+void sdt_task_free(struct task_struct *p);
