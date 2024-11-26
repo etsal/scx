@@ -43,7 +43,7 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 	bool is_idle = false;
 	s32 cpu;
 
-	stats = sdt_task_retrieve(p);
+	stats = SDT_TASK_RETRIEVE(p);
 	if (!stats) {
 		bpf_printk("%s: no stats for pid %d", p->pid);
 		return 0;
@@ -64,7 +64,7 @@ void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct sdt_stats __arena *stats;
 
-	stats = sdt_task_retrieve(p);
+	stats = SDT_TASK_RETRIEVE(p);
 	if (!stats) {
 		bpf_printk("%s: no stats for pid %d", p->pid);
 		return;
@@ -85,7 +85,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 {
 	struct sdt_stats __arena *stats;
 
-	stats = sdt_task_alloc(p);
+	stats = SDT_TASK_ALLOC(p);
 	if (!stats) {
 		bpf_printk("arena allocator out of memory");
 		return -ENOMEM;
@@ -103,7 +103,7 @@ void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 {
 	struct sdt_stats __arena *stats;
 
-	stats = sdt_task_retrieve(p);
+	stats = SDT_TASK_RETRIEVE(p);
 	if (!stats) {
 		bpf_printk("%s: no stats for pid %d", p->pid);
 		return;

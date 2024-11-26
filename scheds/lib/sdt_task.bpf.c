@@ -398,7 +398,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 	return;
 }
 
-void __arena *sdt_task_retrieve(struct task_struct *p)
+uintptr_t sdt_task_retrieve(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data;
 	struct sdt_task_map_val *mval;
@@ -407,11 +407,11 @@ void __arena *sdt_task_retrieve(struct task_struct *p)
 
 	mval = bpf_task_storage_get(&sdt_task_map, p, 0, 0);
 	if (!mval)
-		return NULL;
+		return (uintptr_t)NULL;
 
 	data = mval->data;
 
-	return (void __arena *)data->payload;
+	return (uintptr_t)data->payload;
 }
 
 
@@ -512,7 +512,7 @@ int sdt_task_find_empty(struct sdt_task_desc __arena *desc, struct sdt_task_desc
 	return 0;
 }
 
-void __arena *sdt_task_alloc(struct task_struct *p)
+uintptr_t sdt_task_alloc(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data = NULL;
 	struct sdt_task_desc __arena *desc;
@@ -524,7 +524,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 	mval = bpf_task_storage_get(&sdt_task_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!mval)
-		return NULL;
+		return (uintptr_t)NULL;
 
 	bpf_spin_lock(&sdt_task_lock);
 
@@ -537,7 +537,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 	if (ret != 0) {
 		bpf_spin_unlock(&sdt_task_lock);
 		bpf_printk("%s: error %d on allocation", __func__, ret);
-		return NULL;
+		return (uintptr_t)NULL;
 	}
 
 	cast_kern(desc);
@@ -555,7 +555,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 		if (!data) {
 			sdt_task_free_idx(idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
-			return NULL;
+			return (uintptr_t)NULL;
 		}
 
 		bpf_spin_lock(&sdt_task_lock);
@@ -573,5 +573,5 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 
 	bpf_spin_unlock(&sdt_task_lock);
 
-	return (void __arena *)data->payload;
+	return (uintptr_t)data->payload;
 }
