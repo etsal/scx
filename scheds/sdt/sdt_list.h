@@ -5,7 +5,7 @@
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
-#include "bpf_arena_common.h"
+#include <scx/bpf_arena_common.h>
 
 struct arena_list_node;
 

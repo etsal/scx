@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <scx/common.bpf.h>
-#include <scx/sdt_task_impl.bpf.h>
+#include "../sdt/sdt_task_impl.bpf.h"
 
 #include "scx_sdt.h"
 
