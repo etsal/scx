@@ -4,7 +4,7 @@
  * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
-#include <scx/common.h>
+#include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.h>
 
 #include "sdt_task.h"
@@ -61,7 +61,6 @@ static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
 
 
 static struct sdt_task_desc __arena *sdt_task_desc_root; /* radix tree root */
-static struct sdt_task_desc __arena *sdt_task_new_chunk; /* new chunk cache */
 
 private(LOCK) struct bpf_spin_lock sdt_task_lock;
 private(POOL_LOCK) struct bpf_spin_lock sdt_task_pool_alloc_lock;

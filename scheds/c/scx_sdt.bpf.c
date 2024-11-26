@@ -2,7 +2,7 @@
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.h>
 
-#include "../sdt/sdt_task.h"
+#include "../lib/sdt_task.h"
 #include "scx_sdt.h"
 
 char _license[] SEC("license") = "GPL";

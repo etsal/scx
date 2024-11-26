@@ -8,5 +8,17 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'include'),
 # passed in as executable::include_directories.
 user_c_includes = include_directories('include')
 
-subdir('sdt')
+bpf_libs = ['sdt_task']
+foreach lib: bpf_libs
+    # Custom rule: Compile the library.o and store it in build/lib where it can
+    # be found in subsequent compilations. Run
+    custom_target(lib,
+      input: 'lib/' + lib + '.bpf.c',
+      output: lib + '.bpf.o',
+      depends: [libbpf],
+      command:[bpf_clang, bpf_base_cflags, '-target', 'bpf', libbpf_c_headers,
+            bpf_includes, '-c', '@INPUT@', '-o', '@OUTPUT@']
+)
+endforeach
+
 subdir('c')
