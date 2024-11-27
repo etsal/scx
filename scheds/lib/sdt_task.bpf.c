@@ -398,7 +398,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 	return;
 }
 
-uintptr_t sdt_task_retrieve(struct task_struct *p)
+__hidden uintptr_t sdt_task_retrieve(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data;
 	struct sdt_task_map_val *mval;
@@ -415,7 +415,7 @@ uintptr_t sdt_task_retrieve(struct task_struct *p)
 }
 
 
-void sdt_task_free(struct task_struct *p)
+__hidden void sdt_task_free(struct task_struct *p)
 {
 	struct sdt_task_map_val *mval;
 
@@ -512,7 +512,7 @@ int sdt_task_find_empty(struct sdt_task_desc __arena *desc, struct sdt_task_desc
 	return 0;
 }
 
-uintptr_t sdt_task_alloc(struct task_struct *p)
+__hidden uintptr_t sdt_task_alloc(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data = NULL;
 	struct sdt_task_desc __arena *desc;
