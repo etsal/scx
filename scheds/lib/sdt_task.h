@@ -74,6 +74,8 @@ struct sdt_task_pool {
 	__u64				free_size;
 };
 
+#ifdef __BPF__
+
 uintptr_t sdt_task_retrieve(struct task_struct *p);
 int sdt_task_init(__u64 data_size);
 uintptr_t sdt_task_alloc(struct task_struct *p);
@@ -86,3 +88,5 @@ void sdt_task_free(struct task_struct *p);
  */
 #define SDT_TASK_RETRIEVE(_p) ((void __arena *)sdt_task_retrieve(_p))
 #define SDT_TASK_ALLOC(_p) ((void __arena *)sdt_task_alloc(_p))
+
+#endif /* __BPF__ */
