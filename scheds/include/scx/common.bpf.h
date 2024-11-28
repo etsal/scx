@@ -468,5 +468,6 @@ static inline u32 log2_u64(u64 v) {
 
 #include "compat.bpf.h"
 #include "enums.bpf.h"
+#include "lib/sdt_task.h"
 
 #endif /* __SCX_COMMON_BPF_H */

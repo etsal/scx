@@ -11,7 +11,7 @@ stem="${input%.o}"
 name="${input%.bpf.o}"
 name="${name##*/}"
 
-"$bpftool" gen object "$stem".l1o "$input" "$PWD/scheds/sdt_task.bpf.o"
+"$bpftool" gen object "$stem".l1o "$input" "scheds/lib/lib.bpf.o"
 "$bpftool" gen object "$stem".l2o "$stem".l1o
 "$bpftool" gen object "$stem".l3o "$stem".l2o
 cmp "$stem".l2o "$stem".l3o

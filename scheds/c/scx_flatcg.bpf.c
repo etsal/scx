@@ -129,11 +129,6 @@ struct {
 /* gets inc'd on weight tree changes to expire the cached hweights */
 u64 hweight_gen = 1;
 
-static u64 div_round_up(u64 dividend, u64 divisor)
-{
-	return (dividend + divisor - 1) / divisor;
-}
-
 static bool vtime_before(u64 a, u64 b)
 {
 	return (s64)(a - b) < 0;

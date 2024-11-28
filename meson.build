@@ -47,6 +47,8 @@ fetch_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/fetch_bpftool'))
 build_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/build_bpftool'))
+compile_scx_lib = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/compile_scx_lib'))
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 if bpf_clang_ver == ''
@@ -128,7 +130,7 @@ if should_build_libbpf
   endforeach
 
   message('Fetching libbpf repo')
-  libbpf_commit = '686f600bca59e107af4040d0838ca2b02c14ff50'
+  libbpf_commit = '713f5b077958f5d3d14839b3aafa42330ddbdd56'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   make_jobs = 1
@@ -184,7 +186,7 @@ endif
 
 if should_build_bpftool
   message('Fetching bpftool repo')
-  bpftool_commit = '77a72987353fcae8ce330fd87d4c7afb7677a169'
+  bpftool_commit = 'd844a27fc175aeae3bcb29b052813ef210c97004'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
 
   bpftool_target = custom_target('bpftool_target',
@@ -444,6 +446,8 @@ if enable_stress
       endforeach
   endif
 endif
+
+thread_dep = dependency('threads')
 
 subdir('scheds')
 

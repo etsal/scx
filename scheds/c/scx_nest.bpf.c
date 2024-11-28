@@ -42,7 +42,6 @@ enum {
 };
 
 #define CLOCK_BOOTTIME 7
-#define NUMA_NO_NODE -1
 
 const volatile u64 p_remove_ns = 2 * NSEC_PER_MSEC;
 const volatile u64 r_max = 5;

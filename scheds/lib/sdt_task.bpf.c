@@ -7,8 +7,6 @@
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.h>
 
-#include "sdt_task.h"
-
 #define SDT_TASK_FN_ATTRS	inline __attribute__((unused, always_inline))
 
 struct {
