@@ -369,22 +369,22 @@ void bpf_iter_bits_destroy(struct bpf_iter_bits *it) __ksym;
   }
 #define def_for_each_cpu(cpu, name) for_each_##name##_cpu(cpu)
 
-/// Provides iterator for possible and online cpus. 
+/// Provides iterator for possible and online cpus.
 ///
 /// # Example
 ///
 /// ```
 /// static inline void example_use() {
 ///     int *cpu;
-/// 
+///
 ///     for_each_possible_cpu(cpu){
 ///         bpf_printk("CPU %d is possible", *cpu);
 ///     }
-/// 
+///
 ///     for_each_online_cpu(cpu){
 ///         bpf_printk("CPU %d is online", *cpu);
 ///     }
-/// } 
+/// }
 /// ```
 def_iter_struct(possible);
 def_iter_new(possible);
