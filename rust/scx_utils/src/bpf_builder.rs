@@ -9,12 +9,12 @@ use anyhow::Context;
 use anyhow::Result;
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
-use libbpf_rs::Linker;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Debug)]
 /// # Build helpers for sched_ext schedulers with Rust userspace component
@@ -362,25 +362,38 @@ impl BpfBuilder {
 
         let sources = self.gen_sources(input.into(), deps)?;
 
-        let linkobj = self.out_dir.join(format!("{}.bpf.o", name));
-        let mut linker = Linker::new(&linkobj)?;
+        let mut inter = Vec::new();
+        for source in sources.iter() {
+            let filename = source.file_name().unwrap().to_string_lossy();
 
-        for filename in sources.iter() {
-            let name = filename.file_name().unwrap().to_string_lossy();
-            let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
+            let obj = self.out_dir.join(filename.replace(".bpf.c", ".bpf.o"));
 
             SkeletonBuilder::new()
                 .debug(true)
-                .source(filename)
+                .source(source)
                 .obj(&obj)
                 .clang(&self.clang.clang)
                 .clang_args(&self.cflags)
                 .build()?;
 
-            linker.add_file(&obj)?;
+            inter.push(obj);
         }
 
-        linker.link()?;
+        let linkobj = self.out_dir.join(format!("{}.bpf.o", "bpf"));
+
+        let bpftool = match env::var("BPFTOOL_EXE") {
+            Ok(path) => path,
+            Err(e) => String::from("bpftool"),
+        };
+
+        let mut linkcmd = Command::new(bpftool);
+        linkcmd.arg("gen").arg("object").arg(&linkobj);
+
+        for obj in inter {
+            linkcmd.arg(&obj);
+        }
+
+        linkcmd.output().expect("failed to compile");
 
         let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
 

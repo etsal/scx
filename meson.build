@@ -128,7 +128,7 @@ if should_build_libbpf
   endforeach
 
   message('Fetching libbpf repo')
-  libbpf_commit = '686f600bca59e107af4040d0838ca2b02c14ff50'
+  libbpf_commit = '244485ce7224fc2ef28bf9f917bfdb62d4cc2f22'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   make_jobs = 1
@@ -184,7 +184,7 @@ endif
 
 if should_build_bpftool
   message('Fetching bpftool repo')
-  bpftool_commit = '77a72987353fcae8ce330fd87d4c7afb7677a169'
+  bpftool_commit = '183e7010387d1fc9f08051426e9a9fbd5f8d409e'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
 
   bpftool_target = custom_target('bpftool_target',
@@ -323,6 +323,8 @@ if enable_rust
   if get_option('cargo_home') != ''
     cargo_env.set('CARGO_HOME', get_option('cargo_home'))
   endif
+
+  cargo_env.set('BPFTOOL_EXE', bpftool_exe_path)
 
   run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 
