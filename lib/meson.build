@@ -1,4 +1,4 @@
-libs = ['sdt_alloc', 'sdt_task']
+libs = ['sdt_alloc', 'sdt_task', 'cpumask']
 
 objs = []
 
