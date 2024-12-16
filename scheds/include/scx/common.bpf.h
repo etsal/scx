@@ -89,6 +89,8 @@ bool scx_bpf_task_running(const struct task_struct *p) __ksym;
 s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
 struct rq *scx_bpf_cpu_rq(s32 cpu) __ksym;
 struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym __weak;
+int bpf_cpumask_import(struct cpumask *dst, void *src, size_t src__sz);
+int bpf_cpumask_export(void *dst, size_t dst__sz, struct cpumask *src);
 
 /*
  * Use the following as @it__iter when calling
