@@ -36,14 +36,11 @@
  * load balance based on userspace populating the lb_data map.
  */
 
-#ifdef LSP
-#define __bpf__
-#include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
-#else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
-#endif
+
+#include <lib/sdt_task.h>
+#include <lib/cpumask.h>
 
 #include "intf.h"
 
@@ -54,9 +51,90 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+struct bpfmask_wrapper {
+	struct bpf_cpumask __kptr *instance;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct bpfmask_wrapper);
+	__uint(max_entries, 1);
+} scx_singleton_bpfmask_map SEC(".maps");
+
+static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
+{
+	const u32 zero = 0;
+	struct bpfmask_wrapper *instance;
+
+	instance = bpf_map_lookup_elem(&scx_singleton_bpfmask_map, &zero);
+	if (!instance)
+		return NULL;
+
+	return instance->instance;
+
+}
+
+static s32 create_save_cpumask(struct bpf_cpumask **kptr)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		scx_bpf_error("Failed to create cpumask");
+		return -ENOMEM;
+	}
+
+	cpumask = bpf_kptr_xchg(kptr, cpumask);
+	if (cpumask) {
+		scx_bpf_error("kptr already had cpumask");
+		bpf_cpumask_release(cpumask);
+	}
+
+	return 0;
+}
+
+int scx_singleton_bpf_cpumask_t_init(void)
+{
+	void *map = &scx_singleton_bpfmask_map;
+	struct bpfmask_wrapper instance, *instancep;
+	const u32 zero = 0;
+
+	bpf_map_update_elem(map, &zero, &instance, BPF_NOEXIST);
+	instancep = bpf_map_lookup_elem(map, &zero);
+	if (instancep == NULL) {
+		scx_bpf_error("bpf_cpumask_t singleton not found");
+		return -EINVAL;
+	}
+
+	create_save_cpumask(&instancep->instance);
+
+	return 0;
+}
+
+
 char _license[] SEC("license") = "GPL";
+const u32 zero_u32 = 0;
 
 UEI_DEFINE(uei);
+
+static int scx_pick_idle_cpu(struct scx_cpumask *scxmask, int flags)
+{
+	struct bpf_cpumask *bpfmask;
+	int cpu = 0;
+
+	bpfmask = scx_singleton_bpf_cpumask_t();
+	if (bpfmask == NULL) {
+		scx_bpf_error("bpf_cpumask singleton does not exist");
+		return 0;
+	}
+
+	scx_cpumask_to_bpf(bpfmask, scxmask);
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpfmask), flags);
+	scx_cpumask_from_bpf(scxmask, bpfmask);
+
+	return cpu;
+}
 
 /*
  * const volatiles are set during initialization and treated as consts by the
@@ -502,9 +580,9 @@ struct tune_input{
 } tune_input;
 
 u64 tune_params_gen;
-private(A) struct bpf_cpumask __kptr *all_cpumask;
-private(A) struct bpf_cpumask __kptr *direct_greedy_cpumask;
-private(A) struct bpf_cpumask __kptr *kick_greedy_cpumask;
+private(A) struct scx_cpumask all_cpumask;
+private(A) struct scx_cpumask direct_greedy_cpumask;
+private(A) struct scx_cpumask kick_greedy_cpumask;
 
 static u32 cpu_to_dom_id(s32 cpu)
 {
@@ -543,23 +621,19 @@ static void refresh_tune_params(void)
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
-			if (direct_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, direct_greedy_cpumask);
+			scx_cpumask_set_cpu(cpu, &direct_greedy_cpumask);
 			if (domc->direct_greedy_cpumask)
 				bpf_cpumask_set_cpu(cpu, domc->direct_greedy_cpumask);
 		} else {
-			if (direct_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, direct_greedy_cpumask);
+			scx_cpumask_clear_cpu(cpu, &direct_greedy_cpumask);
 			if (domc->direct_greedy_cpumask)
 				bpf_cpumask_clear_cpu(cpu, domc->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
-			if (kick_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, kick_greedy_cpumask);
+			scx_cpumask_set_cpu(cpu, &kick_greedy_cpumask);
 		} else {
-			if (kick_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, kick_greedy_cpumask);
+			scx_cpumask_clear_cpu(cpu, &kick_greedy_cpumask);
 		}
 	}
 }
@@ -894,9 +968,9 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
-	struct task_ctx *taskc;
-	struct bpf_cpumask *p_cpumask, *tmp_cpumask = NULL;
 	bool prev_domestic, has_idle_cores;
+	struct bpf_cpumask *p_cpumask;
+	struct task_ctx *taskc;
 	s32 cpu;
 
 	refresh_tune_params();
@@ -947,8 +1021,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * indicated by direct_greedy_cpumask. There may also be an idle
 		 * CPU in the domestic domain
 		 */
-		if (direct_greedy_cpumask &&
-		    bpf_cpumask_test_cpu(prev_cpu, cast_mask(direct_greedy_cpumask)) &&
+		if (scx_cpumask_test_cpu(prev_cpu, &direct_greedy_cpumask) &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			stat_add(RUSTY_STAT_GREEDY_IDLE, 1);
@@ -994,11 +1067,11 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * under-utilized, ignore domain boundaries (while still respecting NUMA
 	 * boundaries) and push the task there. Try to find an idle core first.
 	 */
-	if (taskc->all_cpus && direct_greedy_cpumask &&
-	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
+	if (taskc->all_cpus && !scx_cpumask_empty(&direct_greedy_cpumask)) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
+		struct scx_cpumask tmp_direct_greedy;
+		struct scx_cpumask node_mask;
 		struct dom_ctx *domc;
-		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
 		/*
 		 * CPU may be offline e.g. CPU was removed via hotplugging and scheduler
@@ -1015,11 +1088,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		else if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
 
-		tmp_direct_greedy = direct_greedy_cpumask;
-		if (!tmp_direct_greedy) {
-			scx_bpf_error("Failed to lookup direct_greedy mask");
-			goto enoent;
-		}
+		scx_cpumask_copy(&tmp_direct_greedy, &direct_greedy_cpumask);
+
 		/*
 		 * By default, only look for an idle core in the current NUMA
 		 * node when looking for direct greedy CPUs outside of the
@@ -1029,21 +1099,17 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * working set may end up spanning multiple NUMA nodes.
 		 */
 		if (!direct_greedy_numa && domc) {
-			node_mask = domc->node_cpumask;
-			if (!node_mask) {
+			if (!domc->node_cpumask) {
 				scx_bpf_error("Failed to lookup node mask");
 				goto enoent;
 			}
 
-			tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, NULL);
-			if (!tmp_cpumask) {
-				scx_bpf_error("Failed to lookup tmp cpumask");
-				goto enoent;
-			}
-			bpf_cpumask_and(tmp_cpumask,
-					cast_mask(node_mask),
-					cast_mask(tmp_direct_greedy));
-			tmp_direct_greedy = tmp_cpumask;
+			scx_cpumask_from_bpf(&node_mask, domc->node_cpumask);
+
+			scx_cpumask_and(&tmp_direct_greedy,
+					&node_mask,
+					&direct_greedy_cpumask);
+
 		}
 
 		/* Try to find an idle core in the previous and then any domain */
@@ -1057,13 +1123,10 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				}
 			}
 
-			if (direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy),
-							    SCX_PICK_IDLE_CORE);
-				if (cpu >= 0) {
-					stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
-					goto direct;
-				}
+			cpu = scx_pick_idle_cpu(&tmp_direct_greedy, SCX_PICK_IDLE_CORE);
+			if (cpu >= 0) {
+				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
+				goto direct;
 			}
 		}
 
@@ -1078,12 +1141,10 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			}
 		}
 
-		if (direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy), 0);
-			if (cpu >= 0) {
-				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
-				goto direct;
-			}
+		cpu = scx_pick_idle_cpu(&tmp_direct_greedy, 0);
+		if (cpu >= 0) {
+			stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
+			goto direct;
 		}
 	}
 
@@ -1098,20 +1159,11 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	else
 		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
 
-	if (tmp_cpumask) {
-		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
-		if (tmp_cpumask)
-			bpf_cpumask_release(tmp_cpumask);
-	}
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 
 direct:
-	if (tmp_cpumask) {
-		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
-		if (tmp_cpumask)
-			bpf_cpumask_release(tmp_cpumask);
-	}
+
 	taskc->dispatch_local = true;
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
@@ -1200,8 +1252,8 @@ dom_queue:
 	 * CPUs are highly loaded while KICK_GREEDY doesn't. Even under fairly
 	 * high utilization, KICK_GREEDY can slightly improve work-conservation.
 	 */
-	if (taskc->all_cpus && kick_greedy_cpumask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(kick_greedy_cpumask), 0);
+	if (taskc->all_cpus) {
+		cpu = scx_pick_idle_cpu(&kick_greedy_cpumask, 0);
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_KICK_GREEDY, 1);
 			scx_bpf_kick_cpu(cpu, 0);
@@ -1605,33 +1657,14 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
 	struct task_ctx *taskc;
+	struct scx_cpumask mask;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
 	task_pick_and_set_domain(taskc, p, cpumask, false);
-	if (all_cpumask)
-		taskc->all_cpus =
-			bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
-}
-
-static s32 create_save_cpumask(struct bpf_cpumask **kptr)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(kptr, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
-	}
-
-	return 0;
+	scx_cpumask_from_cpumask(&mask, cpumask);
+	taskc->all_cpus = scx_cpumask_subset(&all_cpumask, &mask);
 }
 
 s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
@@ -1675,12 +1708,6 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		return -EINVAL;
 
 	ret = create_save_cpumask(&map_value->cpumask);
-	if (ret) {
-		bpf_map_delete_elem(&task_data, &tptr);
-		return ret;
-	}
-
-	ret = create_save_cpumask(&map_value->tmp_cpumask);
 	if (ret) {
 		bpf_map_delete_elem(&task_data, &tptr);
 		return ret;
@@ -1758,7 +1785,7 @@ static s32 create_dom(u32 dom_id)
 {
 	struct dom_ctx *domc;
 	struct node_ctx *nodec;
-	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
+	struct bpf_cpumask *dom_mask, *node_mask;
 	u32 cpu, node_id;
 	s32 ret;
 
@@ -1787,8 +1814,7 @@ static s32 create_dom(u32 dom_id)
 
 	bpf_rcu_read_lock();
 	dom_mask = domc->cpumask;
-	all_mask = all_cpumask;
-	if (!dom_mask || !all_mask) {
+	if (!dom_mask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("Could not find cpumask");
 		return -ENOENT;
@@ -1806,7 +1832,8 @@ static s32 create_dom(u32 dom_id)
 
 		if (*dmask & (1LLU << (cpu % 64))) {
 			bpf_cpumask_set_cpu(cpu, dom_mask);
-			bpf_cpumask_set_cpu(cpu, all_mask);
+			/* XXX Fix last after we fix the rest. */
+			scx_cpumask_set_cpu(cpu, &all_cpumask);
 		}
 	}
 	bpf_rcu_read_unlock();
@@ -1882,17 +1909,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
 
-	ret = create_save_cpumask(&all_cpumask);
+	ret = scx_singleton_bpf_cpumask_t_init();
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&direct_greedy_cpumask);
-	if (ret)
-		return ret;
-
-	ret = create_save_cpumask(&kick_greedy_cpumask);
-	if (ret)
-		return ret;
+	scx_cpumask_clear(&all_cpumask);
+	scx_cpumask_clear(&direct_greedy_cpumask);
+	scx_cpumask_clear(&kick_greedy_cpumask);
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
