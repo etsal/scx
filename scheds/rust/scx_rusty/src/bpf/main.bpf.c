@@ -84,24 +84,23 @@ static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
 {
 	void *map = &scx_singleton_bpfmask_map;
-	struct bpfmask_wrapper *instance;
+	struct bpfmask_wrapper *instancep;
 	const u32 zero = 0;
 
-	instance = bpf_map_lookup_elem(map, &zero);
-	if (!instance) {
-		bpf_map_update_elem(map, &zero, &instance, BPF_NOEXIST);
-		instance = bpf_map_lookup_elem(map, &zero);
-		if (!instance) {
-			scx_bpf_error("No element in map");
-			return NULL;
-		}
+	instancep = bpf_map_lookup_elem(map, &zero);
+	if (!instancep) {
+		/* Should be impossible. */
+		scx_bpf_error("Did not find map entry");
+		return NULL;
 	}
 
-	if (!instance->instance)
-		create_save_cpumask(&instance->instance);
+	if (!instancep->instance)
+		create_save_cpumask(&instancep->instance);
 
-	return instance->instance;
+	if (!instancep->instance)
+		scx_bpf_error("Did not properly initialize singleton");
 
+	return instancep->instance;
 }
 
 char _license[] SEC("license") = "GPL";
@@ -1166,9 +1165,6 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
 
 	scx_bpf_put_idle_cpumask(idle_smtmask);
-
-	if (cpu < 0)
-		scx_bpf_error("failed to find CPU %d", cpu);
 
 	return cpu;
 
