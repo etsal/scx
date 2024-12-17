@@ -143,17 +143,17 @@ scx_cpumask_copy(struct scx_cpumask *dst, struct scx_cpumask *src)
 __hidden void
 scx_cpumask_to_bpf(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmask)
 {
-	bpf_cpumask_export(cast_mask(bpfmask), scxmask, sizeof(*scxmask));
+	bpf_cpumask_import(cast_mask(bpfmask), scxmask, sizeof(*scxmask));
 }
 
 __hidden void
 scx_cpumask_from_bpf(struct scx_cpumask *scxmask, struct bpf_cpumask *bpfmask)
 {
-	bpf_cpumask_import(scxmask, sizeof(*scxmask), cast_mask(bpfmask));
+	bpf_cpumask_export(scxmask, sizeof(*scxmask), cast_mask(bpfmask));
 }
 
 __hidden void
 scx_cpumask_from_cpumask(struct scx_cpumask *scxmask, const struct cpumask *cpumask)
 {
-	bpf_cpumask_import(scxmask, sizeof(*scxmask), cpumask);
+	bpf_cpumask_export(scxmask, sizeof(*scxmask), cpumask);
 }
