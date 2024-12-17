@@ -1225,6 +1225,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+
+		scx_cpumask_from_bpf(&taskc->cpumask, p_cpumask);
 		return;
 	}
 
@@ -1270,6 +1272,8 @@ dom_queue:
 			scx_bpf_kick_cpu(cpu, 0);
 		}
 	}
+
+	scx_cpumask_from_bpf(&taskc->cpumask, p_cpumask);
 }
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
