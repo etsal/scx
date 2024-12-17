@@ -19,7 +19,7 @@ scx_cpumask_set_cpu(unsigned int cpu, struct scx_cpumask *mask)
 	if (ind >= SCX_MASKLEN)
 		return;
 
-	mask->bits[ind] |= 1U << cpu % 64;
+	mask->bits[ind] |= (1U << (cpu % 64));
 }
 
 __hidden void
@@ -34,7 +34,7 @@ scx_cpumask_clear_cpu(unsigned int cpu, struct scx_cpumask *mask)
 	if (ind >= SCX_MASKLEN)
 		return;
 
-	mask->bits[ind] &= 1U << cpu % 64;
+	mask->bits[ind] &= ~(1U << (cpu % 64));
 }
 
 __hidden bool
@@ -49,7 +49,7 @@ scx_cpumask_test_cpu(unsigned int cpu, struct scx_cpumask *mask)
 	if (ind >= SCX_MASKLEN)
 		return false;
 
-	return (mask->bits[ind] & (1U << cpu % 64)) != 0;
+	return (mask->bits[ind] & (1U << (cpu % 64))) != 0;
 }
 
 __hidden bool
@@ -87,10 +87,10 @@ scx_cpumask_and(struct scx_cpumask *dst, struct scx_cpumask *mask1, struct scx_c
 	if (!mask1 || !mask2)
 		return;
 
-	dst->bits[0] |= mask1->bits[0] & mask2->bits[0];
-	dst->bits[1] |= mask2->bits[1] & mask2->bits[1];
-	dst->bits[2] |= mask1->bits[2] & mask2->bits[2];
-	dst->bits[3] |= mask1->bits[3] & mask2->bits[3];
+	dst->bits[0] = mask1->bits[0] & mask2->bits[0];
+	dst->bits[1] = mask2->bits[1] & mask2->bits[1];
+	dst->bits[2] = mask1->bits[2] & mask2->bits[2];
+	dst->bits[3] = mask1->bits[3] & mask2->bits[3];
 }
 
 
