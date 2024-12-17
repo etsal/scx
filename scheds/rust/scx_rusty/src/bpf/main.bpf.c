@@ -973,8 +973,10 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	refresh_tune_params();
 
-	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL)
-		goto enoent;
+	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL) {
+		scx_bpf_put_idle_cpumask(idle_smtmask);
+		return -ENOENT;
+	}
 
 	/*
 	 * The per-task CPU mask is only used as an argument to scheduler calls
@@ -1165,6 +1167,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
 
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+	scx_cpumask_from_bpf(&taskc->cpumask, p_cpumask);
 
 	return cpu;
 
@@ -1172,11 +1175,13 @@ direct:
 
 	taskc->dispatch_local = true;
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+	scx_cpumask_from_bpf(&taskc->cpumask, p_cpumask);
 
 	return cpu;
 
 enoent:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+	scx_cpumask_from_bpf(&taskc->cpumask, p_cpumask);
 
 	return -ENOENT;
 }
