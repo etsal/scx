@@ -19,7 +19,7 @@ scx_cpumask_set_cpu(unsigned int cpu, struct scx_cpumask *mask)
 	if (ind >= SCX_MASKLEN)
 		return;
 
-	mask->bits[ind] |= 1U << cpu % 64;
+	mask->bits[ind] |= (1U << (cpu % 64));
 }
 
 __hidden void
@@ -34,7 +34,7 @@ scx_cpumask_clear_cpu(unsigned int cpu, struct scx_cpumask *mask)
 	if (ind >= SCX_MASKLEN)
 		return;
 
-	mask->bits[ind] &= 1U << cpu % 64;
+	mask->bits[ind] &= ~(1U << (cpu % 64));
 }
 
 __hidden bool
@@ -49,7 +49,7 @@ scx_cpumask_test_cpu(unsigned int cpu, struct scx_cpumask *mask)
 	if (ind >= SCX_MASKLEN)
 		return false;
 
-	return (mask->bits[ind] & (1U << cpu % 64)) != 0;
+	return (mask->bits[ind] & (1U << (cpu % 64))) != 0;
 }
 
 __hidden bool
@@ -87,10 +87,10 @@ scx_cpumask_and(struct scx_cpumask *dst, struct scx_cpumask *mask1, struct scx_c
 	if (!mask1 || !mask2)
 		return;
 
-	dst->bits[0] |= mask1->bits[0] & mask2->bits[0];
-	dst->bits[1] |= mask2->bits[1] & mask2->bits[1];
-	dst->bits[2] |= mask1->bits[2] & mask2->bits[2];
-	dst->bits[3] |= mask1->bits[3] & mask2->bits[3];
+	dst->bits[0] = mask1->bits[0] & mask2->bits[0];
+	dst->bits[1] = mask1->bits[1] & mask2->bits[1];
+	dst->bits[2] = mask1->bits[2] & mask2->bits[2];
+	dst->bits[3] = mask1->bits[3] & mask2->bits[3];
 }
 
 
@@ -99,13 +99,13 @@ scx_cpumask_intersects(struct scx_cpumask *mask1, struct scx_cpumask *mask2)
 {
 	u64 bits = 0;
 
-	if (!mask1 || !mask2)
+	if (!mask1 || !mask2) {
+		scx_bpf_error("no mask");
 		return false;
-
-	_Static_assert(NR_CPUS % (sizeof(struct scx_cpumask) * 8) == 0, "mask size must be multiple of word");
+	}
 
 	bits |= mask1->bits[0] & mask2->bits[0];
-	bits |= mask2->bits[1] & mask2->bits[1];
+	bits |= mask1->bits[1] & mask2->bits[1];
 	bits |= mask1->bits[2] & mask2->bits[2];
 	bits |= mask1->bits[3] & mask2->bits[3];
 
@@ -121,7 +121,7 @@ scx_cpumask_subset(struct scx_cpumask *mask1, struct scx_cpumask *mask2)
 		return false;
 
 	bits |= mask1->bits[0] & ~mask2->bits[0];
-	bits |= mask2->bits[1] & ~mask2->bits[1];
+	bits |= mask1->bits[1] & ~mask2->bits[1];
 	bits |= mask1->bits[2] & ~mask2->bits[2];
 	bits |= mask1->bits[3] & ~mask2->bits[3];
 
@@ -143,17 +143,20 @@ scx_cpumask_copy(struct scx_cpumask *dst, struct scx_cpumask *src)
 __hidden void
 scx_cpumask_to_bpf(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmask)
 {
-	bpf_cpumask_export(cast_mask(bpfmask), scxmask, sizeof(*scxmask));
+	if (bpf_cpumask_import(cast_mask(bpfmask), scxmask, sizeof(*scxmask)) < 0)
+		scx_bpf_error("%s failed\n", __func__);
 }
 
 __hidden void
 scx_cpumask_from_bpf(struct scx_cpumask *scxmask, struct bpf_cpumask *bpfmask)
 {
-	bpf_cpumask_import(scxmask, sizeof(*scxmask), cast_mask(bpfmask));
+	if (bpf_cpumask_export(scxmask, sizeof(*scxmask), cast_mask(bpfmask)) < 0)
+		scx_bpf_error("%s failed\n", __func__);
 }
 
 __hidden void
 scx_cpumask_from_cpumask(struct scx_cpumask *scxmask, const struct cpumask *cpumask)
 {
-	bpf_cpumask_import(scxmask, sizeof(*scxmask), cpumask);
+	if (bpf_cpumask_export(scxmask, sizeof(*scxmask), cpumask) < 0)
+		scx_bpf_error("%s failed\n", __func__);
 }
