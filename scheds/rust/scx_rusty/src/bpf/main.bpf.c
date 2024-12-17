@@ -62,19 +62,6 @@ struct {
 	__uint(max_entries, 1);
 } scx_singleton_bpfmask_map SEC(".maps");
 
-static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
-{
-	const u32 zero = 0;
-	struct bpfmask_wrapper *instance;
-
-	instance = bpf_map_lookup_elem(&scx_singleton_bpfmask_map, &zero);
-	if (!instance)
-		return NULL;
-
-	return instance->instance;
-
-}
-
 static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 {
 	struct bpf_cpumask *cpumask;
@@ -94,24 +81,28 @@ static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 	return 0;
 }
 
-int scx_singleton_bpf_cpumask_t_init(void)
+static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
 {
 	void *map = &scx_singleton_bpfmask_map;
-	struct bpfmask_wrapper instance, *instancep;
+	struct bpfmask_wrapper *instance;
 	const u32 zero = 0;
 
-	bpf_map_update_elem(map, &zero, &instance, BPF_NOEXIST);
-	instancep = bpf_map_lookup_elem(map, &zero);
-	if (instancep == NULL) {
-		scx_bpf_error("bpf_cpumask_t singleton not found");
-		return -EINVAL;
+	instance = bpf_map_lookup_elem(map, &zero);
+	if (!instance) {
+		bpf_map_update_elem(map, &zero, &instance, BPF_NOEXIST);
+		instance = bpf_map_lookup_elem(map, &zero);
+		if (!instance) {
+			scx_bpf_error("No element in map");
+			return NULL;
+		}
 	}
 
-	create_save_cpumask(&instancep->instance);
+	if (!instance->instance)
+		create_save_cpumask(&instance->instance);
 
-	return 0;
+	return instance->instance;
+
 }
-
 
 char _license[] SEC("license") = "GPL";
 const u32 zero_u32 = 0;
@@ -857,30 +848,37 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
+	struct bpf_cpumask *singleton = scx_singleton_bpf_cpumask_t();
 	struct dom_ctx *old_domc, *new_domc;
-	struct bpf_cpumask *d_cpumask, *t_cpumask;
+	struct bpf_cpumask *d_cpumask;
+	struct scx_cpumask *t_cpumask;
 	u64 tptr;
 	u32 old_dom_id = taskc->dom_id;
 	tptr = t_to_tptr(p);
 
-	t_cpumask = taskc->cpumask;
-	if (!t_cpumask) {
-		scx_bpf_error("Failed to look up task cpumask");
+	if (singleton == NULL)
+		return false;
+
+	t_cpumask = &taskc->cpumask;
+
+	old_domc = lookup_dom_ctx(old_dom_id);
+	if (!old_domc) {
+		scx_bpf_error("Old domain not found");
 		return false;
 	}
 
-	old_domc = lookup_dom_ctx(old_dom_id);
-	if (!old_domc)
-		return false;
-
 	if (new_dom_id == NO_DOM_FOUND) {
-		bpf_cpumask_clear(t_cpumask);
+		scx_bpf_error("New domain not found");
+		scx_cpumask_clear(t_cpumask);
 		return !(p->scx.flags & SCX_TASK_QUEUED);
 	}
 
 	new_domc = lookup_dom_ctx(new_dom_id);
-	if (!new_domc)
+	if (!new_domc) {
+		scx_bpf_error("Failed to get dom%u",
+			      new_dom_id);
 		return false;
+	}
 
 	d_cpumask = new_domc->cpumask;
 	if (!d_cpumask) {
@@ -888,7 +886,6 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			      new_dom_id);
 		return false;
 	}
-
 
 	/*
 	 * set_cpumask might have happened between userspace requesting LB and
@@ -904,7 +901,9 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
-		bpf_cpumask_and(t_cpumask, cast_mask(d_cpumask), p->cpus_ptr);
+
+		bpf_cpumask_and(singleton, cast_mask(d_cpumask), p->cpus_ptr);
+		scx_cpumask_from_bpf(t_cpumask, singleton);
 	}
 
 	return taskc->dom_id == new_dom_id;
@@ -968,15 +967,21 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
+	struct bpf_cpumask *p_cpumask = scx_singleton_bpf_cpumask_t();
 	bool prev_domestic, has_idle_cores;
-	struct bpf_cpumask *p_cpumask;
 	struct task_ctx *taskc;
 	s32 cpu;
 
 	refresh_tune_params();
 
-	if (!(taskc = lookup_task_ctx(p)) || !(p_cpumask = taskc->cpumask))
+	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL)
 		goto enoent;
+
+	/*
+	 * The per-task CPU mask is only used as an argument to scheduler calls
+	 * throughout the function, so keep it around as a bpf_cpumask *.
+	 */
+	scx_cpumask_to_bpf(p_cpumask, &taskc->cpumask);
 
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
@@ -1038,6 +1043,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	/* If there is a domestic idle core, dispatch directly */
 	if (has_idle_cores) {
+
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), SCX_PICK_IDLE_CORE);
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
@@ -1160,16 +1166,22 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
 
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+
+	if (cpu < 0)
+		scx_bpf_error("failed to find CPU %d", cpu);
+
 	return cpu;
 
 direct:
 
 	taskc->dispatch_local = true;
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+
 	return cpu;
 
 enoent:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+
 	return -ENOENT;
 }
 
@@ -1183,19 +1195,17 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	struct bpf_cpumask *p_cpumask = scx_singleton_bpf_cpumask_t();
 	struct task_ctx *taskc;
-	struct bpf_cpumask *p_cpumask;
 	u64 tptr;
 	u32 *new_dom;
 	s32 cpu;
 	tptr = t_to_tptr(p);
 
-	if (!(taskc = lookup_task_ctx(p)))
+	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL)
 		return;
-	if (!(p_cpumask = taskc->cpumask)) {
-		scx_bpf_error("NULL cpumask");
-		return;
-	}
+
+	scx_cpumask_to_bpf(p_cpumask, &taskc->cpumask);
 
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
@@ -1321,7 +1331,7 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 	taskc->preferred_dom_mask = 0;
 
 	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
-	    !p->mempolicy || !taskc->cpumask)
+	    !p->mempolicy)
 		return;
 
 	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
@@ -1707,11 +1717,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
-	ret = create_save_cpumask(&map_value->cpumask);
-	if (ret) {
-		bpf_map_delete_elem(&task_data, &tptr);
-		return ret;
-	}
+	scx_cpumask_clear(&map_value->cpumask);
 
 	task_pick_and_set_domain(map_value, p, p->cpus_ptr, true);
 
@@ -1832,7 +1838,6 @@ static s32 create_dom(u32 dom_id)
 
 		if (*dmask & (1LLU << (cpu % 64))) {
 			bpf_cpumask_set_cpu(cpu, dom_mask);
-			/* XXX Fix last after we fix the rest. */
 			scx_cpumask_set_cpu(cpu, &all_cpumask);
 		}
 	}
@@ -1908,10 +1913,6 @@ static s32 initialize_cpu(s32 cpu)
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
-
-	ret = scx_singleton_bpf_cpumask_t_init();
-	if (ret)
-		return ret;
 
 	scx_cpumask_clear(&all_cpumask);
 	scx_cpumask_clear(&direct_greedy_cpumask);

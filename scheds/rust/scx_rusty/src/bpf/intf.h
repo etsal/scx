@@ -26,6 +26,8 @@ typedef unsigned long long u64;
 #include <scx/ravg.bpf.h>
 #endif
 
+#include <lib/cpumask.h>
+
 enum consts {
 	MAX_CPUS		= 512,
 	MAX_DOMS		= 64,	/* limited to avoid complex bitmask ops */
@@ -101,7 +103,7 @@ struct task_ctx {
 	u64 dom_mask;
 	u64 preferred_dom_mask;
 
-	struct bpf_cpumask __kptr *cpumask;
+	struct scx_cpumask cpumask;
 	u32 dom_id;
 	u32 weight;
 	bool runnable;
