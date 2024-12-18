@@ -673,16 +673,17 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read task_ctx and load.
         let load_half_life = self.skel.maps.rodata_data.load_half_life;
-        let task_data = &self.skel.maps.task_data;
+        let arena = &self.skel.maps.arena;
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
             let tptr = active_tptrs.tptrs[(idx % MAX_TPTRS) as usize];
             let key = unsafe { std::mem::transmute::<u64, [u8; 8]>(tptr) };
 
-            if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+            if let Some(arena_elem) = arena.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+                // XXX Do we need to do the equivalent of cast_user?
                 let task_ctx =
-                    unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
+                    unsafe { &*(arena_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
                 if task_ctx.dom_id as usize != dom.id {
                     continue;
                 }

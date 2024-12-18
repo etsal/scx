@@ -141,20 +141,84 @@ scx_cpumask_copy(struct scx_cpumask *dst, struct scx_cpumask *src)
 __hidden void
 scx_cpumask_to_bpf(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmask)
 {
-	if (bpf_cpumask_import(cast_mask(bpfmask), scxmask, sizeof(*scxmask)) < 0)
+	struct scx_cpumask tmp;
+
+	scx_cpumask_copy(&tmp, scxmask);
+
+	if (bpf_cpumask_import(cast_mask(bpfmask), &tmp, sizeof(tmp)) < 0)
 		scx_bpf_error("%s failed\n", __func__);
+
+	scx_cpumask_copy(&scxmask, &tmp);
 }
 
 __hidden void
 scx_cpumask_from_bpf(struct scx_cpumask *scxmask, struct bpf_cpumask *bpfmask)
 {
-	if (bpf_cpumask_export(scxmask, sizeof(*scxmask), cast_mask(bpfmask)) < 0)
+	struct scx_cpumask tmp;
+
+	scx_cpumask_copy(&tmp, scxmask);
+
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), cast_mask(bpfmask)) < 0)
 		scx_bpf_error("%s failed\n", __func__);
+
+	scx_cpumask_copy(&scxmask, &tmp);
 }
 
 __hidden void
 scx_cpumask_from_cpumask(struct scx_cpumask *scxmask, const struct cpumask *cpumask)
 {
-	if (bpf_cpumask_export(scxmask, sizeof(*scxmask), cpumask) < 0)
+	struct scx_cpumask tmp;
+
+	scx_cpumask_copy(&tmp, scxmask);
+
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), cpumask) < 0)
 		scx_bpf_error("%s failed\n", __func__);
+
+	scx_cpumask_copy(&scxmask, &tmp);
 }
+
+/*
+ * The register type of the function is practically part of the type system, so
+ * for a function we can either pass an arena (map) pointer or a regular pointer, but
+ * not both. Doing otherwise causes the verifier to reject the program. The code
+ * below is an exact duplicate of the one above.
+ */
+__hidden void
+scx_cpumask_to_bpf_arena(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmask)
+{
+	struct scx_cpumask tmp;
+
+	scx_cpumask_copy(&tmp, scxmask);
+
+	if (bpf_cpumask_import(cast_mask(bpfmask), &tmp, sizeof(tmp)) < 0)
+		scx_bpf_error("%s failed\n", __func__);
+
+	scx_cpumask_copy(&scxmask, &tmp);
+}
+
+__hidden void
+scx_cpumask_from_bpf_arena(struct scx_cpumask *scxmask, struct bpf_cpumask *bpfmask)
+{
+	struct scx_cpumask tmp;
+
+	scx_cpumask_copy(&tmp, scxmask);
+
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), cast_mask(bpfmask)) < 0)
+		scx_bpf_error("%s failed\n", __func__);
+
+	scx_cpumask_copy(&scxmask, &tmp);
+}
+
+__hidden void
+scx_cpumask_from_cpumask_arena(struct scx_cpumask *scxmask, const struct cpumask *cpumask)
+{
+	struct scx_cpumask tmp;
+
+	scx_cpumask_copy(&tmp, scxmask);
+
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), cpumask) < 0)
+		scx_bpf_error("%s failed\n", __func__);
+
+	scx_cpumask_copy(&scxmask, &tmp);
+}
+
