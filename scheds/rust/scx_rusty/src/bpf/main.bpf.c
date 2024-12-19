@@ -244,21 +244,6 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
-static u64 t_to_tptr(struct task_struct *p)
-{
-	u64 tptr;
-	int err;
-
-	err = bpf_probe_read_kernel(&tptr, sizeof(tptr), &p);
-
-	if (err){
-		scx_bpf_error("Failed to cast task_struct addr to tptr");
-		return 0;
-	}
-
-	return tptr;
-}
-
 static struct task_ctx __arena *try_lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx __arena *taskc;
@@ -483,23 +468,6 @@ static __always_inline int dom_dcycle_xfer_task(struct task_struct *p __arg_trus
 static u64 dom_min_vruntime(struct dom_ctx *domc)
 {
 	return READ_ONCE(domc->min_vruntime);
-}
-
-static struct task_struct *tptr_to_task(u64 tptr)
-{
-	struct task_struct *p, *task;
-	int err_task;
-
-	task = (struct task_struct *)tptr;
-
-	err_task = bpf_probe_read_kernel(&p, sizeof(struct task_struct *), &task);
-	if (err_task) {
-		scx_bpf_error("Failed to retrieve task_struct for tptr %llu",
-			      tptr);
-		return NULL;
-	}
-
-	return p;
 }
 
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 old_dom_id, u32 new_dom_id, u64 now)
@@ -843,15 +811,9 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	struct bpf_cpumask *d_cpumask;
 	struct scx_cpumask *p_cpumask;
 	u32 old_dom_id = taskc->dom_id;
-	u64 tptr = t_to_tptr(p);
 
 	if (singleton == NULL) {
 		scx_bpf_error("no singleton");
-		return false;
-	}
-
-	if (tptr == 0) {
-		scx_bpf_error("no tptr");
 		return false;
 	}
 
@@ -1194,20 +1156,22 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct bpf_cpumask *p_cpumask = scx_singleton_bpf_cpumask_t();
 	struct task_ctx *taskc;
-	u64 tptr;
+	struct task_ctx *key;
 	u32 *new_dom;
 	s32 cpu;
-	tptr = t_to_tptr(p);
 
 	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL)
 		return;
 
 	scx_cpumask_to_bpf_arena(p_cpumask, &taskc->cpumask);
 
+	key = taskc;
+	cast_user(key);
+
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
 	 */
-	new_dom = bpf_map_lookup_elem(&lb_data, &tptr);
+	new_dom = bpf_map_lookup_elem(&lb_data, (u64 *)&key);
 	if (new_dom && *new_dom != taskc->dom_id &&
 	    task_set_domain(taskc, p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
@@ -1601,14 +1565,12 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
-	u64 tptr;
-	tptr = t_to_tptr(p);
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
 	if (debug >= 2)
-		bpf_printk("%s[%llu]: SET_WEIGHT %u -> %u", p->comm, tptr,
+		bpf_printk("%s[%llu]: SET_WEIGHT %u -> %u", p->comm, taskc,
 			   taskc->weight, weight);
 
 	taskc->weight = weight;
@@ -1697,7 +1659,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
-		.tptr = t_to_tptr(p),
 	};
 
 	scx_cpumask_clear(&taskc->cpumask);

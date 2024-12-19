@@ -323,7 +323,7 @@ impl LoadEntity {
 
 #[derive(Debug)]
 struct TaskInfo {
-    tptr: u64,
+    taskc: u64,
     load: OrderedFloat<f64>,
     dom_mask: u64,
     preferred_dom_mask: u64,
@@ -678,7 +678,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         for idx in ridx..widx {
             let taskc = active_tptrs.tasks[(idx % MAX_TPTRS) as usize];
             let task_ctx = unsafe { &*(taskc as *const bpf_intf::task_ctx) };
-            println!("Context {:?}", task_ctx);
 
             if task_ctx.dom_id as usize != dom.id {
                 continue;
@@ -703,7 +702,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             load *= weight;
 
             dom.tasks.insert(TaskInfo {
-                tptr: task_ctx.tptr,
+                taskc: taskc as u64,
                 load: OrderedFloat(load),
                 dom_mask: task_ctx.dom_mask,
                 preferred_dom_mask: task_ctx.preferred_dom_mask,
@@ -800,7 +799,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         let load = *(task.load);
-        let tptr = task.tptr;
+        let tptr = task.taskc;
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
