@@ -673,47 +673,43 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read task_ctx and load.
         let load_half_life = self.skel.maps.rodata_data.load_half_life;
-        let task_data = &self.skel.maps.task_data;
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
-            let tptr = active_tptrs.tptrs[(idx % MAX_TPTRS) as usize];
-            let key = unsafe { std::mem::transmute::<u64, [u8; 8]>(tptr) };
+            let taskc = active_tptrs.tasks[(idx % MAX_TPTRS) as usize];
+            let task_ctx = unsafe { &*(taskc as *const bpf_intf::task_ctx) };
+            println!("Context {:?}", task_ctx);
 
-            if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
-                let task_ctx =
-                    unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
-                if task_ctx.dom_id as usize != dom.id {
-                    continue;
-                }
-
-                let rd = &task_ctx.dcyc_rd;
-                let mut load = ravg_read(
-                    rd.val,
-                    rd.val_at,
-                    rd.old,
-                    rd.cur,
-                    now_mono,
-                    load_half_life,
-                    RAVG_FRAC_BITS,
-                );
-
-                let weight = if self.lb_apply_weight {
-                    (task_ctx.weight as f64).min(self.infeas_threshold)
-                } else {
-                    DEFAULT_WEIGHT
-                };
-                load *= weight;
-
-                dom.tasks.insert(TaskInfo {
-                    tptr,
-                    load: OrderedFloat(load),
-                    dom_mask: task_ctx.dom_mask,
-                    preferred_dom_mask: task_ctx.preferred_dom_mask,
-                    migrated: Cell::new(false),
-                    is_kworker: task_ctx.is_kworker,
-                });
+            if task_ctx.dom_id as usize != dom.id {
+                continue;
             }
+
+            let rd = &task_ctx.dcyc_rd;
+            let mut load = ravg_read(
+                rd.val,
+                rd.val_at,
+                rd.old,
+                rd.cur,
+                now_mono,
+                load_half_life,
+                RAVG_FRAC_BITS,
+            );
+
+            let weight = if self.lb_apply_weight {
+                (task_ctx.weight as f64).min(self.infeas_threshold)
+            } else {
+                DEFAULT_WEIGHT
+            };
+            load *= weight;
+
+            dom.tasks.insert(TaskInfo {
+                tptr: task_ctx.tptr,
+                load: OrderedFloat(load),
+                dom_mask: task_ctx.dom_mask,
+                preferred_dom_mask: task_ctx.preferred_dom_mask,
+                migrated: Cell::new(false),
+                is_kworker: task_ctx.is_kworker,
+            });
         }
 
         Ok(())
