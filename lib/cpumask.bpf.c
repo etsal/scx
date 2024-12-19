@@ -88,7 +88,7 @@ scx_cpumask_and(struct scx_cpumask *dst, struct scx_cpumask *mask1, struct scx_c
 		return;
 
 	dst->bits[0] = mask1->bits[0] & mask2->bits[0];
-	dst->bits[1] = mask2->bits[1] & mask2->bits[1];
+	dst->bits[1] = mask1->bits[1] & mask2->bits[1];
 	dst->bits[2] = mask1->bits[2] & mask2->bits[2];
 	dst->bits[3] = mask1->bits[3] & mask2->bits[3];
 }
@@ -99,11 +99,13 @@ scx_cpumask_intersects(struct scx_cpumask *mask1, struct scx_cpumask *mask2)
 {
 	u64 bits = 0;
 
-	if (!mask1 || !mask2)
+	if (!mask1 || !mask2) {
+		scx_bpf_error("no mask");
 		return false;
+	}
 
 	bits |= mask1->bits[0] & mask2->bits[0];
-	bits |= mask2->bits[1] & mask2->bits[1];
+	bits |= mask1->bits[1] & mask2->bits[1];
 	bits |= mask1->bits[2] & mask2->bits[2];
 	bits |= mask1->bits[3] & mask2->bits[3];
 
@@ -119,7 +121,7 @@ scx_cpumask_subset(struct scx_cpumask *mask1, struct scx_cpumask *mask2)
 		return false;
 
 	bits |= mask1->bits[0] & ~mask2->bits[0];
-	bits |= mask2->bits[1] & ~mask2->bits[1];
+	bits |= mask1->bits[1] & ~mask2->bits[1];
 	bits |= mask1->bits[2] & ~mask2->bits[2];
 	bits |= mask1->bits[3] & ~mask2->bits[3];
 
