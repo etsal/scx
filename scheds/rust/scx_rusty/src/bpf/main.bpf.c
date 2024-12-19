@@ -221,7 +221,7 @@ struct dom_active_tptrs {
 	u64 gen;
 	u64 read_idx;
 	u64 write_idx;
-	u64 tptrs[MAX_DOM_ACTIVE_TPTRS];
+	struct task_ctx __arena *tasks[MAX_DOM_ACTIVE_TPTRS];
 };
 
 struct dom_active_tptrs dom_active_tptrs[MAX_DOMS];
@@ -845,11 +845,15 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	u32 old_dom_id = taskc->dom_id;
 	u64 tptr = t_to_tptr(p);
 
-	if (singleton == NULL)
+	if (singleton == NULL) {
+		scx_bpf_error("no singleton");
 		return false;
+	}
 
-	if (tptr == 0)
+	if (tptr == 0) {
+		scx_bpf_error("no tptr");
 		return false;
+	}
 
 	p_cpumask = &taskc->cpumask;
 
@@ -1483,12 +1487,16 @@ static void running_update_vtime(struct task_struct *p,
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
-	struct task_ctx *taskc;
+	struct task_ctx __arena *taskc_arena, *taskc;
 	struct dom_ctx *domc;
 	u32 dom_id, dap_gen;
 
-	if (!(taskc = lookup_task_ctx(p)))
+	taskc_arena = sdt_task_data(p);
+	if (!taskc_arena)
 		return;
+
+	taskc = taskc_arena;
+	cast_kern(taskc);
 
 	dom_id = taskc->dom_id;
 	if (dom_id >= MAX_DOMS) {
@@ -1505,16 +1513,17 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (taskc->dom_active_tptrs_gen != dap_gen) {
 		u64 idx = __sync_fetch_and_add(&dom_active_tptrs[dom_id].write_idx, 1) %
 			MAX_DOM_ACTIVE_TPTRS;
-		u64 *tptrp;
+		struct task_ctx * __arena *taskcp;
 
-		tptrp = MEMBER_VPTR(dom_active_tptrs, [dom_id].tptrs[idx]);
-		if (!tptrp) {
+		taskcp = MEMBER_VPTR(dom_active_tptrs, [dom_id].tasks[idx]);
+		if (!taskcp) {
 			scx_bpf_error("dom_active_tptrs[%u][%llu] indexing failed",
 				      dom_id, idx);
 			return;
 		}
 
-		*tptrp = t_to_tptr(p);
+		cast_user(taskc_arena);
+		*taskcp = taskc_arena;
 		taskc->dom_active_tptrs_gen = dap_gen;
 	}
 
@@ -1688,6 +1697,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
+		.tptr = t_to_tptr(p),
 	};
 
 	scx_cpumask_clear(&taskc->cpumask);

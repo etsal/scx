@@ -132,6 +132,7 @@ struct task_ctx {
 	bool dispatch_local;
 
 	struct ravg_data dcyc_rd;
+	u64 tptr;
 };
 
 struct bucket_ctx {
