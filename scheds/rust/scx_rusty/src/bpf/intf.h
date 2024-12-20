@@ -103,7 +103,7 @@ struct task_ctx {
 	u64 dom_mask;
 	u64 preferred_dom_mask;
 
-	struct scx_cpumask cpumask;
+	struct scx_cpumask __arena *cpumask;
 	u32 dom_id;
 	u32 weight;
 	bool runnable;

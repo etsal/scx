@@ -823,10 +823,11 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
 	struct dom_ctx *old_domc, *new_domc;
-	struct scx_cpumask *p_cpumask;
+	struct scx_cpumask __arena *p_cpumask;
 	u32 old_dom_id = taskc->dom_id;
 
-	p_cpumask = &taskc->cpumask;
+	p_cpumask = taskc->cpumask;
+	cast_kern(p_cpumask);
 
 	old_domc = lookup_dom_ctx(old_dom_id);
 	if (!old_domc) {
@@ -919,7 +920,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
 	bool prev_domestic, has_idle_cores;
-	struct scx_cpumask *p_cpumask;
+	struct scx_cpumask __arena *p_cpumask;
 	struct task_ctx *taskc;
 	s32 cpu;
 
@@ -934,7 +935,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * The per-task CPU mask is only used as an argument to scheduler calls
 	 * throughout the function, so keep it around as a bpf_cpumask *.
 	 */
-	p_cpumask = &taskc->cpumask;
+	p_cpumask = taskc->cpumask;
+	cast_kern(p_cpumask);
 
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
@@ -1139,7 +1141,7 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct scx_cpumask *p_cpumask;
+	struct scx_cpumask __arena *p_cpumask;
 	struct task_ctx *taskc;
 	struct task_ctx *key;
 	u32 *new_dom;
@@ -1148,7 +1150,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	p_cpumask = &taskc->cpumask;
+	p_cpumask = taskc->cpumask;
+	cast_kern(p_cpumask);
 
 	key = taskc;
 	cast_user(key);
@@ -1638,7 +1641,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		.preferred_dom_mask = 0,
 	};
 
-	scx_cpumask_clear(&taskc->cpumask);
+	taskc->cpumask = scx_cpumask_alloc();
+	if (!taskc->cpumask) {
+		sdt_task_free(p);
+		return -ENOMEM;
+	}
 
 	if (debug >= 2)
 		bpf_printk("%s: INIT (weight %u))", p->comm, p->scx.weight);
@@ -1651,6 +1658,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
+	struct task_ctx *taskc;
+
+	taskc = sdt_task_data(p);
+	if (taskc != NULL)
+		scx_cpumask_free(taskc->cpumask);
+
 	sdt_task_free(p);
 }
 

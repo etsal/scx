@@ -20,7 +20,7 @@ struct sdt_allocator sdt_cpumask_allocator;
 static size_t scxmask_size = 0;
 
 __hidden
-int sdt_cpumask_init(void)
+int scx_cpumask_init(void)
 {
 	scxmask_size = div_round_up(scx_bpf_nr_cpu_ids(), 64);
 
@@ -28,10 +28,11 @@ int sdt_cpumask_init(void)
 }
 
 __hidden
-struct scx_cpumask __arena *sdt_cpumask_alloc(void)
+struct scx_cpumask __arena *scx_cpumask_alloc(void)
 {
 	struct sdt_data __arena *data = NULL;
 	struct sdt_cpumask_map_val mval;
+	struct scx_cpumask *scxmask;
 	u64 key;
 	int ret;
 
@@ -49,11 +50,15 @@ struct scx_cpumask __arena *sdt_cpumask_alloc(void)
 		return NULL;
 	}
 
-	return (void __arena *)data->payload;
+	scxmask = (struct scx_cpumask __arena *)data->payload;
+	cast_kern(scxmask);
+	scx_cpumask_clear(scxmask);
+
+	return (struct scx_cpumask __arena *)data->payload;
 }
 
 __hidden
-void sdt_cpumask_free(struct scx_cpumask __arena *scxmask)
+void scx_cpumask_free(struct scx_cpumask __arena *scxmask)
 {
 	struct sdt_cpumask_map_val *mval;
 	u64 key = (u64) scxmask;
@@ -68,23 +73,6 @@ void sdt_cpumask_free(struct scx_cpumask __arena *scxmask)
 	mval->data = NULL;
 
 	bpf_map_delete_elem(&sdt_cpumask_map, &key);
-}
-
-__hidden struct scx_cpumask __arena *
-scx_cpumask_alloc(void)
-{
-	struct scx_cpumask *scxmask, *mask;
-
-	scxmask = sdt_cpumask_alloc();
-	if (scxmask == NULL)
-		return NULL;
-
-	mask = scxmask;
-	cast_kern(mask);
-
-	scx_cpumask_clear(mask);
-
-	return scxmask;
 }
 
 /*
