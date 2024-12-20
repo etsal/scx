@@ -142,9 +142,9 @@ struct bucket_ctx {
 
 struct dom_ctx {
 	u32 id;
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *direct_greedy_cpumask;
-	struct bpf_cpumask __kptr *node_cpumask;
+	struct scx_cpumask cpumask;
+	struct scx_cpumask direct_greedy_cpumask;
+	struct scx_cpumask node_cpumask;
 
 	u64 min_vruntime;
 
