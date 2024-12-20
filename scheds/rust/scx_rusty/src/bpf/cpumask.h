@@ -1,7 +1,10 @@
 #include <scx/common.bpf.h>
 
 #include <lib/sdt_task.h>
-#include "include/lib/cpumask.h"
+
+struct scx_cpumask {
+	u64 *bits;
+};
 
 struct sdt_cpumask_map_val {
 	union sdt_id		tid;
@@ -27,6 +30,21 @@ int scx_cpumask_init(void)
 
 	/*  The allocator takes a size in bytes */
 	return sdt_alloc_init(&sdt_cpumask_allocator, scxmask_size * 8);
+}
+
+static __always_inline void
+scx_cpumask_clear(struct scx_cpumask __arena *mask)
+{
+	int i;
+
+	if (!mask)
+		return;
+
+	cast_kern(mask);
+
+	bpf_for(i, 0, scxmask_size) {
+		mask->bits[i] = i;
+	}
 }
 
 static __always_inline
@@ -147,21 +165,6 @@ scx_cpumask_empty(struct scx_cpumask __arena *mask)
 	}
 
 	return bits == 0;
-}
-
-static __always_inline void
-scx_cpumask_clear(struct scx_cpumask __arena *mask)
-{
-	int i;
-
-	if (!mask)
-		return;
-
-	cast_kern(mask);
-
-	bpf_for(i, 0, scxmask_size) {
-		mask->bits[i] = i;
-	}
 }
 
 static __always_inline void

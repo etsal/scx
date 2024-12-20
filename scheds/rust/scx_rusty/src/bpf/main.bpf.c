@@ -40,7 +40,7 @@
 #include <scx/ravg_impl.bpf.h>
 
 #include <lib/sdt_task.h>
-#include <lib/cpumask.h>
+#include "cpumask.h"
 
 #include "intf.h"
 
@@ -589,10 +589,10 @@ static void refresh_tune_params(void)
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			scx_cpumask_set_cpu(cpu, &direct_greedy_cpumask);
-			scx_cpumask_set_cpu(cpu, &domc->direct_greedy_cpumask);
+			scx_cpumask_set_cpu(cpu, domc->direct_greedy_cpumask);
 		} else {
 			scx_cpumask_clear_cpu(cpu, &direct_greedy_cpumask);
-			scx_cpumask_clear_cpu(cpu, &domc->direct_greedy_cpumask);
+			scx_cpumask_clear_cpu(cpu, domc->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
@@ -827,7 +827,6 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	u32 old_dom_id = taskc->dom_id;
 
 	p_cpumask = taskc->cpumask;
-	cast_kern(p_cpumask);
 
 	old_domc = lookup_dom_ctx(old_dom_id);
 	if (!old_domc) {
@@ -852,7 +851,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (scx_cpumask_intersects(&new_domc->cpumask, (struct scx_cpumask *)p->cpus_ptr)) {
+	if (scx_cpumask_intersects(new_domc->cpumask, (struct scx_cpumask *)p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
@@ -863,7 +862,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
 
-		scx_cpumask_and(p_cpumask, &new_domc->cpumask, (struct scx_cpumask *)p->cpus_ptr);
+		scx_cpumask_and(p_cpumask, new_domc->cpumask, (struct scx_cpumask *)p->cpus_ptr);
 	}
 
 	return taskc->dom_id == new_dom_id;
@@ -891,7 +890,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	share_llc = scx_cpumask_test_cpu(prev_cpu, &domc->cpumask);
+	share_llc = scx_cpumask_test_cpu(prev_cpu, domc->cpumask);
 	if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		stat_add(RUSTY_STAT_SYNC_PREV_IDLE, 1);
 
@@ -899,7 +898,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		goto out;
 	}
 
-	has_idle = scx_cpumask_intersects(&domc->cpumask, (struct scx_cpumask *)idle_cpumask);
+	has_idle = scx_cpumask_intersects(domc->cpumask, (struct scx_cpumask *)idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
@@ -936,7 +935,6 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * throughout the function, so keep it around as a bpf_cpumask *.
 	 */
 	p_cpumask = taskc->cpumask;
-	cast_kern(p_cpumask);
 
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
@@ -1060,7 +1058,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * working set may end up spanning multiple NUMA nodes.
 		 */
 		if (!direct_greedy_numa && domc) {
-			scx_cpumask_copy(&node_mask, &domc->node_cpumask);
+			scx_cpumask_copy(&node_mask, domc->node_cpumask);
 			scx_cpumask_and(&tmp_direct_greedy,
 					&node_mask,
 					&direct_greedy_cpumask);
@@ -1070,7 +1068,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
 			if (domc) {
-				cpu = scx_pick_idle_cpu(&domc->direct_greedy_cpumask,
+				cpu = scx_pick_idle_cpu(domc->direct_greedy_cpumask,
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
@@ -1089,7 +1087,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * No idle core. Is there any idle CPU?
 		 */
 		if (domc) {
-			cpu = scx_pick_idle_cpu(&domc->direct_greedy_cpumask, 0);
+			cpu = scx_pick_idle_cpu(domc->direct_greedy_cpumask, 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
 				goto direct;
@@ -1151,7 +1149,6 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	p_cpumask = taskc->cpumask;
-	cast_kern(p_cpumask);
 
 	key = taskc;
 	cast_user(key);
@@ -1229,7 +1226,7 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 	if (!domc)
 		return false;
 
-	return scx_cpumask_intersects((struct scx_cpumask *)cpumask, &domc->cpumask);
+	return scx_cpumask_intersects((struct scx_cpumask *)cpumask, domc->cpumask);
 }
 
 u32 dom_node_id(u32 dom_id)
@@ -1659,10 +1656,13 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
 	struct task_ctx *taskc;
+	struct scx_cpumask __arena *cpumask;
 
 	taskc = sdt_task_data(p);
-	if (taskc != NULL)
+	cast_kern(taskc);
+	if (taskc != NULL) {
 		scx_cpumask_free(taskc->cpumask);
+	}
 
 	sdt_task_free(p);
 }
@@ -1739,10 +1739,14 @@ static s32 create_dom(u32 dom_id)
 
 	domc->id = dom_id;
 
-	scx_cpumask_clear(&domc->cpumask);
+	domc->cpumask = scx_cpumask_alloc();
+	if (!domc->cpumask) {
+		scx_bpf_error("cannot create dom%d", dom_id);
+		return -ENOMEM;
+	}
 
 	bpf_rcu_read_lock();
-	dom_mask = &domc->cpumask;
+	dom_mask = domc->cpumask;
 
 	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *dmask;
@@ -1763,7 +1767,11 @@ static s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	scx_cpumask_clear(&domc->direct_greedy_cpumask);
+	domc->direct_greedy_cpumask = scx_cpumask_alloc();
+	if (!domc->direct_greedy_cpumask) {
+		scx_bpf_error("cannot create dom%d", dom_id);
+		return -ENOMEM;
+	}
 
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
 	if (!nodec) {
@@ -1772,11 +1780,15 @@ static s32 create_dom(u32 dom_id)
 		return -ENOENT;
 	}
 
-	scx_cpumask_clear(&domc->node_cpumask);
+	domc->node_cpumask = scx_cpumask_alloc();
+	if (!domc->node_cpumask) {
+		scx_bpf_error("cannot create dom%d", dom_id);
+		return -ENOMEM;
+	}
 
 	bpf_rcu_read_lock();
 	node_mask = nodec->cpumask;
-	dom_mask = &domc->node_cpumask;
+	dom_mask = domc->node_cpumask;
 	if (!node_mask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("cpumask lookup failed");
