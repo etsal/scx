@@ -126,6 +126,24 @@ static int scx_pick_idle_cpu(struct scx_cpumask *scxmask, int flags)
 	return cpu;
 }
 
+static int scx_pick_any_cpu(struct scx_cpumask *scxmask, int flags)
+{
+	struct bpf_cpumask *bpfmask;
+	int cpu = 0;
+
+	bpfmask = scx_singleton_bpf_cpumask_t();
+	if (bpfmask == NULL) {
+		scx_bpf_error("bpf_cpumask singleton does not exist");
+		return 0;
+	}
+
+	scx_cpumask_to_bpf(bpfmask, scxmask);
+	cpu = scx_bpf_pick_any_cpu(cast_mask(bpfmask), flags);
+	scx_cpumask_from_bpf(scxmask, bpfmask);
+
+	return cpu;
+}
+
 /*
  * const volatiles are set during initialization and treated as consts by the
  * jit compiler.
@@ -804,15 +822,9 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
-	struct bpf_cpumask *singleton = scx_singleton_bpf_cpumask_t();
 	struct dom_ctx *old_domc, *new_domc;
 	struct scx_cpumask *p_cpumask;
 	u32 old_dom_id = taskc->dom_id;
-
-	if (singleton == NULL) {
-		scx_bpf_error("no singleton");
-		return false;
-	}
 
 	p_cpumask = &taskc->cpumask;
 
@@ -906,14 +918,14 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
-	struct bpf_cpumask *p_cpumask = scx_singleton_bpf_cpumask_t();
 	bool prev_domestic, has_idle_cores;
+	struct scx_cpumask *p_cpumask;
 	struct task_ctx *taskc;
 	s32 cpu;
 
 	refresh_tune_params();
 
-	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL) {
+	if (!(taskc = lookup_task_ctx(p))) {
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 		return -ENOENT;
 	}
@@ -922,7 +934,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * The per-task CPU mask is only used as an argument to scheduler calls
 	 * throughout the function, so keep it around as a bpf_cpumask *.
 	 */
-	scx_cpumask_to_bpf_arena(p_cpumask, &taskc->cpumask);
+	p_cpumask = &taskc->cpumask;
 
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
@@ -947,7 +959,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
 
 	/* did @p get pulled out to a foreign domain by e.g. greedy execution? */
-	prev_domestic = bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_cpumask));
+	prev_domestic = scx_cpumask_test_cpu(prev_cpu, p_cpumask);
 
 	/*
 	 * See if we want to keep @prev_cpu. We want to keep @prev_cpu if the
@@ -985,7 +997,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	/* If there is a domestic idle core, dispatch directly */
 	if (has_idle_cores) {
 
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), SCX_PICK_IDLE_CORE);
+		cpu = scx_pick_idle_cpu(p_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
 			goto direct;
@@ -1003,7 +1015,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 
 	/* If there is any domestic idle CPU, dispatch directly */
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), 0);
+	cpu = scx_pick_idle_cpu(p_cpumask, 0);
 	if (cpu >= 0) {
 		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
 		goto direct;
@@ -1098,10 +1110,9 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (prev_domestic)
 		cpu = prev_cpu;
 	else
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
+		cpu = scx_pick_any_cpu(p_cpumask, 0);
 
 	scx_bpf_put_idle_cpumask(idle_smtmask);
-	scx_cpumask_from_bpf_arena(&taskc->cpumask, p_cpumask);
 
 	return cpu;
 
@@ -1109,13 +1120,11 @@ direct:
 
 	taskc->dispatch_local = true;
 	scx_bpf_put_idle_cpumask(idle_smtmask);
-	scx_cpumask_from_bpf_arena(&taskc->cpumask, p_cpumask);
 
 	return cpu;
 
 enoent:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
-	scx_cpumask_from_bpf_arena(&taskc->cpumask, p_cpumask);
 
 	return -ENOENT;
 }
@@ -1130,16 +1139,16 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct bpf_cpumask *p_cpumask = scx_singleton_bpf_cpumask_t();
+	struct scx_cpumask *p_cpumask;
 	struct task_ctx *taskc;
 	struct task_ctx *key;
 	u32 *new_dom;
 	s32 cpu;
 
-	if (!(taskc = lookup_task_ctx(p)) || p_cpumask == NULL)
+	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	scx_cpumask_to_bpf_arena(p_cpumask, &taskc->cpumask);
+	p_cpumask = &taskc->cpumask;
 
 	key = taskc;
 	cast_user(key);
@@ -1152,7 +1161,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	    task_set_domain(taskc, p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
+		cpu = scx_pick_any_cpu(p_cpumask, 0);
 		if (cpu >= 0)
 			scx_bpf_kick_cpu(cpu, 0);
 		goto dom_queue;
@@ -1162,7 +1171,6 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 		taskc->dispatch_local = false;
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 
-		scx_cpumask_from_bpf_arena(&taskc->cpumask, p_cpumask);
 		return;
 	}
 
@@ -1174,8 +1182,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	 * the domain would be woken up which can induce temporary execution
 	 * stalls. Kick a domestic CPU if @p is on a foreign domain.
 	 */
-	if (!bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), cast_mask(p_cpumask))) {
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
+	if (!scx_cpumask_test_cpu(scx_bpf_task_cpu(p), p_cpumask)) {
+		cpu = scx_pick_any_cpu(p_cpumask, 0);
 		scx_bpf_kick_cpu(cpu, 0);
 		stat_add(RUSTY_STAT_REPATRIATE, 1);
 	}
@@ -1208,8 +1216,6 @@ dom_queue:
 			scx_bpf_kick_cpu(cpu, 0);
 		}
 	}
-
-	scx_cpumask_from_bpf_arena(&taskc->cpumask, p_cpumask);
 }
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
