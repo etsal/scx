@@ -1,5 +1,6 @@
 #include <scx/common.bpf.h>
 
+#include <lib/sdt_task.h>
 #include "include/lib/cpumask.h"
 
 /*
@@ -147,10 +148,10 @@ scx_cpumask_to_bpf(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmask)
 
 	scx_cpumask_copy(&tmp, scxmask);
 
-	if (bpf_cpumask_import(cast_mask(bpfmask), &tmp, sizeof(tmp)) < 0)
+	if (bpf_cpumask_import((struct cpumask *)bpfmask, &tmp, sizeof(tmp)) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
-	scx_cpumask_copy(&scxmask, &tmp);
+	scx_cpumask_copy(scxmask, &tmp);
 }
 
 __hidden void
@@ -160,10 +161,10 @@ scx_cpumask_from_bpf(struct scx_cpumask *scxmask, struct bpf_cpumask *bpfmask)
 
 	scx_cpumask_copy(&tmp, scxmask);
 
-	if (bpf_cpumask_export(&tmp, sizeof(tmp), cast_mask(bpfmask)) < 0)
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), (struct cpumask *)bpfmask) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
-	scx_cpumask_copy(&scxmask, &tmp);
+	scx_cpumask_copy(scxmask, &tmp);
 }
 
 __hidden void
@@ -173,10 +174,10 @@ scx_cpumask_from_cpumask(struct scx_cpumask *scxmask, const struct cpumask *cpum
 
 	scx_cpumask_copy(&tmp, scxmask);
 
-	if (bpf_cpumask_export(&tmp, sizeof(tmp), cpumask) < 0)
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), (struct cpumask *)cpumask) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
-	scx_cpumask_copy(&scxmask, &tmp);
+	scx_cpumask_copy(scxmask, &tmp);
 }
 
 /*
@@ -192,10 +193,10 @@ scx_cpumask_to_bpf_arena(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmas
 
 	scx_cpumask_copy(&tmp, scxmask);
 
-	if (bpf_cpumask_import(cast_mask(bpfmask), &tmp, sizeof(tmp)) < 0)
+	if (bpf_cpumask_import((struct cpumask *)bpfmask, &tmp, sizeof(tmp)) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
-	scx_cpumask_copy(&scxmask, &tmp);
+	scx_cpumask_copy(scxmask, &tmp);
 }
 
 __hidden void
@@ -205,10 +206,10 @@ scx_cpumask_from_bpf_arena(struct scx_cpumask *scxmask, struct bpf_cpumask *bpfm
 
 	scx_cpumask_copy(&tmp, scxmask);
 
-	if (bpf_cpumask_export(&tmp, sizeof(tmp), cast_mask(bpfmask)) < 0)
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), (struct cpumask *)bpfmask) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
-	scx_cpumask_copy(&scxmask, &tmp);
+	scx_cpumask_copy(scxmask, &tmp);
 }
 
 __hidden void
@@ -218,9 +219,9 @@ scx_cpumask_from_cpumask_arena(struct scx_cpumask *scxmask, const struct cpumask
 
 	scx_cpumask_copy(&tmp, scxmask);
 
-	if (bpf_cpumask_export(&tmp, sizeof(tmp), cpumask) < 0)
+	if (bpf_cpumask_export(&tmp, sizeof(tmp), (struct cpumask *)cpumask) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
-	scx_cpumask_copy(&scxmask, &tmp);
+	scx_cpumask_copy(scxmask, &tmp);
 }
 
