@@ -1,10 +1,7 @@
 #pragma once
 
-#define NR_CPUS (256)
-#define SCX_MASKLEN (NR_CPUS / 64)
-
 struct scx_cpumask {
-	u64 bits[SCX_MASKLEN];
+	u64 *bits;
 };
 
 void scx_cpumask_set_cpu(unsigned int, struct scx_cpumask *);
