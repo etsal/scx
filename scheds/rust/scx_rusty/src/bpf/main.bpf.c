@@ -144,6 +144,39 @@ static int scx_pick_any_cpu(struct scx_cpumask __arena *scxmask, int flags)
 	return cpu;
 }
 
+static int scx_cpumask_intersects_bpfmask(struct scx_cpumask *scxmask,
+					  struct bpf_cpumask *bpfmask)
+{
+	struct bpf_cpumask *singleton;
+
+	singleton = scx_singleton_bpf_cpumask_t();
+	if (singleton == NULL || bpfmask == NULL) {
+		scx_bpf_error("bpf_cpumask singleton does not exist");
+		return 0;
+	}
+
+	scx_cpumask_to_bpf(singleton, scxmask);
+
+	return bpf_cpumask_intersects(cast_mask(bpfmask), cast_mask(singleton));
+}
+
+static void
+scx_cpumask_and_bpfmask(struct scx_cpumask *dst, struct scx_cpumask *scxmask,
+			struct bpf_cpumask *bpfmask)
+{
+	struct bpf_cpumask *singleton;
+	int cpu = 0;
+
+	singleton = scx_singleton_bpf_cpumask_t();
+	if (singleton == NULL || bpfmask == NULL) {
+		scx_bpf_error("bpf_cpumask singleton does not exist");
+		return;
+	}
+
+	scx_cpumask_to_bpf(singleton, scxmask);
+	bpf_cpumask_and(singleton, cast_mask(bpfmask), cast_mask(singleton));
+	scx_cpumask_from_bpf(scxmask, singleton);
+}
 /*
  * const volatiles are set during initialization and treated as consts by the
  * jit compiler.
@@ -819,7 +852,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	}
 }
 
-static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
+bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
 	struct dom_ctx *old_domc, *new_domc;
@@ -851,7 +884,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (scx_cpumask_intersects(new_domc->cpumask, (struct scx_cpumask *)p->cpus_ptr)) {
+	if (scx_cpumask_intersects_bpfmask(new_domc->cpumask, (struct bpf_cpumask *)p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
@@ -862,7 +895,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
 
-		scx_cpumask_and(p_cpumask, new_domc->cpumask, (struct scx_cpumask *)p->cpus_ptr);
+		scx_cpumask_and_bpfmask(p_cpumask, new_domc->cpumask, (struct bpf_cpumask *)p->cpus_ptr);
 	}
 
 	return taskc->dom_id == new_dom_id;
@@ -898,7 +931,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		goto out;
 	}
 
-	has_idle = scx_cpumask_intersects(domc->cpumask, (struct scx_cpumask *)idle_cpumask);
+	has_idle = scx_cpumask_intersects_bpfmask(domc->cpumask, (struct bpf_cpumask *)idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
@@ -1219,7 +1252,7 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 	if (!domc)
 		return false;
 
-	return scx_cpumask_intersects((struct scx_cpumask *)cpumask, domc->cpumask);
+	return scx_cpumask_intersects_bpfmask(domc->cpumask, (struct bpf_cpumask *)cpumask);
 }
 
 u32 dom_node_id(u32 dom_id)
