@@ -2,12 +2,14 @@
 
 #include <lib/sdt_task.h>
 
+#define SCX_CPUMASK_MAX_SIZE (4)
+
 struct scx_cpumask {
 	u64 *bits;
 };
 
 struct scx_cpumask_arg {
-	u64 bits[8];
+	u64 bits[SCX_CPUMASK_MAX_SIZE];
 };
 
 struct sdt_cpumask_map_val {
@@ -306,17 +308,12 @@ scx_cpumask_copy_to_arg(struct scx_cpumask_arg *dst, struct scx_cpumask __arena 
 
 	cast_kern(src_bits);
 
-	if (scxmask_size > 8)
+	if (scxmask_size > SCX_CPUMASK_MAX_SIZE)
 		return;
 
-	dst->bits[0] = src_bits[0];
-	dst->bits[1] = src_bits[1];
-	dst->bits[2] = src_bits[2];
-	dst->bits[3] = src_bits[3];
-	dst->bits[4] = src_bits[4];
-	dst->bits[5] = src_bits[5];
-	dst->bits[6] = src_bits[6];
-	dst->bits[7] = src_bits[7];
+	bpf_for(i, 0, SCX_CPUMASK_MAX_SIZE) {
+		dst->bits[i] = src_bits[i];
+	}
 }
 
 
@@ -337,14 +334,9 @@ scx_cpumask_copy_from_arg(struct scx_cpumask __arena *dst, struct scx_cpumask_ar
 	if (scxmask_size > 8)
 		return;
 
-	dst_bits[0] = src->bits[0];
-	dst_bits[1] = src->bits[1];
-	dst_bits[2] = src->bits[2];
-	dst_bits[3] = src->bits[3];
-	dst_bits[4] = src->bits[4];
-	dst_bits[5] = src->bits[5];
-	dst_bits[6] = src->bits[6];
-	dst_bits[7] = src->bits[7];
+	bpf_for(i, 0, SCX_CPUMASK_MAX_SIZE) {
+		dst_bits[i] = src->bits[i];
+	}
 }
 
 static __always_inline void
@@ -355,13 +347,11 @@ scx_cpumask_to_bpf(struct bpf_cpumask *bpfmask, struct scx_cpumask *scxmask)
 
 	scx_cpumask_copy_to_arg(&tmp, scxmask);
 
-	if (sz < 0 || sz > 32)
+	if (sz < 0 || sz > SCX_CPUMASK_MAX_SIZE)
 		return;
 
 	if (bpf_cpumask_import((struct cpumask *)bpfmask, &tmp, 32) < 0)
 		scx_bpf_error("%s failed\n", __func__);
-
-	scx_cpumask_copy_from_arg(scxmask, &tmp);
 }
 
 static __always_inline void
@@ -370,12 +360,10 @@ scx_cpumask_from_cpumask(struct scx_cpumask *scxmask, const struct cpumask *cpum
 	size_t sz = scxmask_size;
 	struct scx_cpumask_arg tmp;
 
-	scx_cpumask_copy_to_arg(&tmp, scxmask);
-
-	if (sz < 0 || sz > 32)
+	if (sz < 0 || sz > SCX_CPUMASK_MAX_SIZE)
 		return;
 
-	if (bpf_cpumask_export(&tmp, 32, (struct cpumask *)cpumask) < 0)
+	if (bpf_cpumask_export(&tmp, sz, (struct cpumask *)cpumask) < 0)
 		scx_bpf_error("%s failed\n", __func__);
 
 	scx_cpumask_copy_from_arg(scxmask, &tmp);
