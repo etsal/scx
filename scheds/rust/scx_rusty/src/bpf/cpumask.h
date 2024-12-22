@@ -45,6 +45,7 @@ scx_cpumask_clear(struct scx_cpumask __arena *mask)
 	if (!mask)
 		return;
 
+	cast_kern(mask);
 	bits = mask->bits;
 	cast_kern(bits);
 
@@ -119,6 +120,7 @@ scx_cpumask_set_cpu(unsigned int cpu, struct scx_cpumask __arena *mask)
 	if (ind >= scxmask_size)
 		return;
 
+	cast_kern(mask);
 	bits = mask->bits;
 	cast_kern(bits);
 
@@ -138,6 +140,7 @@ scx_cpumask_clear_cpu(unsigned int cpu, struct scx_cpumask __arena *mask)
 	if (ind >= scxmask_size)
 		return;
 
+	cast_kern(mask);
 	bits = mask->bits;
 	cast_kern(bits);
 
@@ -157,6 +160,7 @@ scx_cpumask_test_cpu(unsigned int cpu, struct scx_cpumask __arena *mask)
 	if (ind >= scxmask_size)
 		return false;
 
+	cast_kern(mask);
 	bits = mask->bits;
 	cast_kern(bits);
 
@@ -173,6 +177,7 @@ scx_cpumask_empty(struct scx_cpumask __arena *mask)
 	if (!mask)
 		return false;
 
+	cast_kern(mask);
 	bits = mask->bits;
 	cast_kern(bits);
 
@@ -192,6 +197,10 @@ scx_cpumask_and(struct scx_cpumask __arena *dst, struct scx_cpumask __arena *mas
 
 	if (!mask1 || !mask2 || !dst)
 		return;
+
+	cast_kern(mask1);
+	cast_kern(mask2);
+	cast_kern(dst);
 
 	mask1_bits = mask1->bits;
 	mask2_bits = mask2->bits;
@@ -218,6 +227,9 @@ scx_cpumask_intersects(struct scx_cpumask __arena *mask1, struct scx_cpumask __a
 		return false;
 	}
 
+	cast_kern(mask1);
+	cast_kern(mask2);
+
 	mask1_bits = mask1->bits;
 	mask2_bits = mask2->bits;
 
@@ -241,6 +253,9 @@ scx_cpumask_subset(struct scx_cpumask __arena *mask1, struct scx_cpumask __arena
 	if (!mask1 || !mask2)
 		return false;
 
+	cast_kern(mask1);
+	cast_kern(mask2);
+
 	mask1_bits = mask1->bits;
 	mask2_bits = mask2->bits;
 
@@ -263,6 +278,9 @@ scx_cpumask_copy(struct scx_cpumask __arena *dst, struct scx_cpumask __arena *sr
 	if (!src || !dst)
 		return;
 
+	cast_kern(src);
+	cast_kern(dst);
+
 	src_bits = src->bits;
 	dst_bits = dst->bits;
 
@@ -283,6 +301,7 @@ scx_cpumask_copy_to_arg(struct scx_cpumask_arg *dst, struct scx_cpumask __arena 
 	if (!src || !dst)
 		return;
 
+	cast_kern(src);
 	src_bits = src->bits;
 
 	cast_kern(src_bits);
@@ -310,6 +329,7 @@ scx_cpumask_copy_from_arg(struct scx_cpumask __arena *dst, struct scx_cpumask_ar
 	if (!src || !dst)
 		return;
 
+	cast_kern(dst);
 	dst_bits = dst->bits;
 
 	cast_kern(dst_bits);
