@@ -145,19 +145,19 @@ static int scx_pick_any_cpu(struct scx_cpumask __arena *scxmask, int flags)
 }
 
 static int scx_cpumask_intersects_bpfmask(struct scx_cpumask *scxmask,
-					  struct bpf_cpumask *bpfmask)
+					  const struct cpumask *cpumask __arg_trusted)
 {
 	struct bpf_cpumask *singleton;
 
 	singleton = scx_singleton_bpf_cpumask_t();
-	if (singleton == NULL || bpfmask == NULL) {
+	if (singleton == NULL || cpumask == NULL) {
 		scx_bpf_error("bpf_cpumask singleton does not exist");
 		return 0;
 	}
 
 	scx_cpumask_to_bpf(singleton, scxmask);
 
-	return bpf_cpumask_intersects(cast_mask(bpfmask), cast_mask(singleton));
+	return bpf_cpumask_intersects(cpumask, cast_mask(singleton));
 }
 
 static void
@@ -852,7 +852,8 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	}
 }
 
-bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
+__hidden bool
+task_set_domain(struct task_ctx __arena *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
 	struct dom_ctx *old_domc, *new_domc;
@@ -884,7 +885,7 @@ bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (scx_cpumask_intersects_bpfmask(new_domc->cpumask, (struct bpf_cpumask *)p->cpus_ptr)) {
+	if (scx_cpumask_intersects_bpfmask(new_domc->cpumask, p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
@@ -931,7 +932,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		goto out;
 	}
 
-	has_idle = scx_cpumask_intersects_bpfmask(domc->cpumask, (struct bpf_cpumask *)idle_cpumask);
+	has_idle = scx_cpumask_intersects_bpfmask(domc->cpumask, idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
@@ -1244,7 +1245,7 @@ dom_queue:
 	}
 }
 
-static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
+static bool cpumask_intersects_domain(const struct cpumask *cpumask __arg_trusted, u32 dom_id)
 {
 	struct dom_ctx *domc;
 
@@ -1252,7 +1253,7 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 	if (!domc)
 		return false;
 
-	return scx_cpumask_intersects_bpfmask(domc->cpumask, (struct bpf_cpumask *)cpumask);
+	return scx_cpumask_intersects_bpfmask(domc->cpumask, cpumask);
 }
 
 u32 dom_node_id(u32 dom_id)
@@ -1580,7 +1581,7 @@ void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 }
 
 static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
-			    const struct cpumask *cpumask)
+			    const struct cpumask *cpumask __arg_trusted)
 {
 	s32 cpu = bpf_get_smp_processor_id();
 	u32 first_dom = NO_DOM_FOUND, dom, preferred_dom = NO_DOM_FOUND;
@@ -1616,10 +1617,11 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 	return preferred_dom != NO_DOM_FOUND ? preferred_dom: first_dom;
 }
 
-static void task_pick_and_set_domain(struct task_ctx *taskc,
-				     struct task_struct *p,
-				     const struct cpumask *cpumask,
-				     bool init_dsq_vtime)
+__hidden void
+task_pick_and_set_domain(struct task_ctx __arena *taskc,
+			 struct task_struct *p __arg_trusted,
+			 const struct cpumask *cpumask __arg_trusted,
+			 bool init_dsq_vtime)
 {
 	u32 dom_id = 0;
 
@@ -1642,12 +1644,14 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
+#if 0
 	task_pick_and_set_domain(taskc, p, cpumask, false);
 	scx_cpumask_from_cpumask(&mask, cpumask);
 	taskc->all_cpus = scx_cpumask_subset(&all_cpumask, &mask);
+#endif
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p __arg_trusted,
 		   struct scx_init_task_args *args)
 {
 	u64 now = bpf_ktime_get_ns();
