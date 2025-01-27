@@ -396,8 +396,8 @@ int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_
 	return 0;
 }
 
-__hidden
-void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
+__weak
+int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 {
 	const __u64 mask = (1 << SDT_TASK_ENTS_PER_PAGE_SHIFT) - 1;
 	sdt_desc_t *lv_desc[SDT_TASK_LEVELS];
@@ -412,13 +412,16 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	sdt_subprog_init_arena();
 
+	if (!alloc)
+		return 0;
+
 	bpf_spin_lock(&sdt_lock);
 
 	desc = alloc->root;
 	if (unlikely(!desc)) {
 		bpf_spin_unlock(&sdt_lock);
 		scx_bpf_error("%s: root not allocated", __func__);
-		return;
+		return 0;
 	}
 
 	/* To appease the verifier. */
@@ -449,7 +452,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 			bpf_spin_unlock(&sdt_lock);
 			scx_bpf_error("%s: freeing nonexistent idx [0x%llx] (level %llu)",
 				__func__, idx, level);
-			return;
+			return 0;
 		}
 	}
 
@@ -476,7 +479,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 	ret = sdt_mark_nodes_avail(lv_desc, lv_pos);
 	if (unlikely(ret != 0)) {
 		bpf_spin_unlock(&sdt_lock);
-		return;
+		return 0;
 	}
 
 	sdt_stats.active_allocs -= 1;
@@ -484,7 +487,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	bpf_spin_unlock(&sdt_lock);
 
-	return;
+	return 0;
 }
 
 /*
