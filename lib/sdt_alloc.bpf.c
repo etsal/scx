@@ -701,7 +701,7 @@ int sdt_static_init(size_t alloc_pages)
 	size_t max_bytes = alloc_pages * PAGE_SIZE;
 	void __arena *memory;
 
-	memory = bpf_arena_alloc_pages(&arena, NULL, max_bytes, NUMA_NO_NODE, 0);
+	memory = bpf_arena_alloc_pages(&arena, NULL, alloc_pages, NUMA_NO_NODE, 0);
 	if (!memory)
 		return -ENOMEM;
 
