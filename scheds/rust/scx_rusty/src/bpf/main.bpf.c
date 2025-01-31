@@ -1909,6 +1909,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
 
+	ret = sdt_static_init(PAGE_SIZE);
+	if (ret)
+		return ret;
+
 	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
