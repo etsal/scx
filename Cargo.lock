@@ -2384,6 +2384,7 @@ dependencies = [
  "log",
  "nvml-wrapper",
  "paste",
+ "rayon",
  "regex",
  "scx_stats",
  "serde",

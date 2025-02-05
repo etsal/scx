@@ -10,6 +10,7 @@ use anyhow::Result;
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
+use rayon::prelude::*;
 use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
@@ -340,24 +341,31 @@ impl BpfBuilder {
         let linkobj = self.out_dir.join(format!("{}.bpf.o", name));
         let mut linker = Linker::new(&linkobj)?;
 
-        for filename in self.sources.iter() {
-            let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
+        let objects: Vec<PathBuf> = self.sources.par_iter().map(|filename| {
+            let outname = Path::new(filename).file_name().unwrap().to_str().unwrap();
+            let obj = self.out_dir.join(outname.replace(".bpf.c", ".bpf.o"));
 
+            println!("Object is {:?}", &obj);
             let output = SkeletonBuilder::new()
                 .debug(true)
                 .source(filename)
                 .obj(&obj)
                 .clang(&self.clang.clang)
                 .clang_args(&self.cflags)
-                .build()?;
+                .build()
+                .unwrap();
 
             for line in String::from_utf8_lossy(output.stderr()).lines() {
                 println!("cargo:warning={}", line);
             }
 
+            obj
+        }).collect();
+
+        for obj in objects {
+            println!("{:?}", &obj);
             linker.add_file(&obj)?;
         }
-
         linker.link()?;
 
         self.bindgen_bpf_intf()?;
