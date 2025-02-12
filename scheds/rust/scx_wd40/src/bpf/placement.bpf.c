@@ -8,10 +8,14 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
+#include "cpumask.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 #include "deadline.h"
+
+#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
@@ -129,7 +133,7 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
 	dom_ptr old_domc, new_domc;
-	struct bpf_cpumask *d_cpumask, *t_cpumask;
+	scx_bitmap_t d_cpumask, t_cpumask;
 	struct lb_domain *new_lb_domain;
 	struct task_ctx *taskc;
 	u32 old_dom_id;
@@ -146,7 +150,7 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 		return false;
 
 	if (new_dom_id == NO_DOM_FOUND) {
-		bpf_cpumask_clear(t_cpumask);
+		scx_bitmap_clear(t_cpumask);
 		return !(p->scx.flags & SCX_TASK_QUEUED);
 	}
 
@@ -172,7 +176,7 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (bpf_cpumask_intersects(cast_mask(d_cpumask), p->cpus_ptr)) {
+	if (scx_bitmap_intersects_cpumask(d_cpumask, p->cpus_ptr)) {
 		u64 now = scx_bpf_now();
 
 		if (!init_dsq_vtime)
@@ -183,7 +187,7 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		init_vtime(p, taskc);
-		bpf_cpumask_and(t_cpumask, cast_mask(d_cpumask), p->cpus_ptr);
+		scx_bitmap_and_cpumask(t_cpumask, d_cpumask, p->cpus_ptr);
 	}
 
 	return taskc->target_dom == new_dom_id;
