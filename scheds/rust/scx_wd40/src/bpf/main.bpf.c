@@ -79,7 +79,6 @@ UEI_DEFINE(uei);
  */
 const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
-const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 wd40_perf_mode;
 
 const volatile bool kthreads_local;
@@ -908,7 +907,7 @@ static s32 initialize_cpu(s32 cpu)
 SEC("syscall")
 int wd40_arena_setup(void)
 {
-	int ret;
+	int ret, i;
 
 	ret = sdt_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
 	if (ret)
@@ -942,6 +941,21 @@ int wd40_arena_setup(void)
 	if (ret)
 		return ret;
 
+	/* The node masks are initialized from userspace .*/
+
+	if (nr_nodes >= MAX_NUMA_NODES) {
+		scx_bpf_error("Invalid # of nodes (%d)", nr_nodes);
+		return -ENOENT;
+	}
+
+	bpf_for(i, 0, nr_nodes) {
+		ret = create_save_scx_bitmap(&node_data[i]);
+		if (ret)
+			return ret;
+
+		bpf_printk("Allocated %d, %p", i, node_data[i]);
+	}
+
 	return (0);
 }
 
@@ -949,11 +963,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 {
 	s32 i, ret;
 
-	bpf_for(i, 0, nr_nodes) {
-		ret = create_node(i);
-		if (ret)
-			return ret;
-	}
 	bpf_for(i, 0, nr_doms) {
 		ret = create_dom(i);
 		if (ret)
