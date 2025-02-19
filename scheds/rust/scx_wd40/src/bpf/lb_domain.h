@@ -12,6 +12,7 @@ dom_ptr try_lookup_dom_ctx(u32 dom_id);
 dom_ptr lookup_dom_ctx(u32 dom_id);
 struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc);
 
+__weak s32 alloc_dom(u32 dom_id);
 __weak s32 create_dom(u32 dom_id);
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now);
 

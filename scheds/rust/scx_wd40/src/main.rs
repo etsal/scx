@@ -454,8 +454,10 @@ impl<'a> Scheduler<'a> {
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
+                let domc = &mut unsafe{(*skel.maps.bss_data.dom_ctxs[dom.id()])};
+                let dom_cpumask_slice = &mut unsafe{(*domc.cpumask).bits};
+
                 let raw_dom_slice = dom.mask_slice();
-                let dom_cpumask_slice = &mut skel.maps.bss_data.dom_cpumasks[dom.id()];
                 let (left, _) = dom_cpumask_slice.split_at_mut(raw_dom_slice.len());
                 left.clone_from_slice(raw_dom_slice);
                 skel.maps.bss_data.dom_numa_id_map[dom.id()] =

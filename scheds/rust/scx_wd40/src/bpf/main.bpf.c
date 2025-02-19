@@ -612,6 +612,9 @@ static bool dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 	u32 my_node;
 	u32 dom;
 
+	/* XXX Check if the addresses of the nodes are the same, the dom 
+	 * we traverse to should be in the array. */
+
 	my_node = dom_node_id(curr_dom);
 
 	/* try to steal a task from domains on the current NUMA node */
@@ -877,6 +880,8 @@ static s32 initialize_cpu(s32 cpu)
 	int perf;
 	u32 i;
 
+	sdt_subprog_init_arena();
+
 	if (!pcpuc)
 		return -ENOENT;
 
@@ -952,8 +957,12 @@ int wd40_arena_setup(void)
 		ret = create_save_scx_bitmap(&node_data[i]);
 		if (ret)
 			return ret;
+	}
 
-		bpf_printk("Allocated %d, %p", i, node_data[i]);
+	bpf_for(i, 0, nr_doms) {
+		ret = alloc_dom(i);
+		if (ret)
+			return ret;
 	}
 
 	return (0);
