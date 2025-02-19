@@ -354,33 +354,39 @@ __weak s32 alloc_dom(u32 dom_id)
 	return 0;
 }
 
-__hidden
+__weak
 s32 create_dom(u32 dom_id)
 {
 	dom_ptr domc;
-	u32 node_id = 0;
+	u32 node_id;
 	s32 ret;
 
 	/*
 	 * XXX This is why we have to have a node struct, the sched_ext core
 	 * uses them to match DSQs to NUMA nodes.
 	 */
+#if 0
 	node_id = dom_node_id(dom_id);
-
-	ret = scx_bpf_create_dsq(dom_id, node_id);
-	if (ret < 0) {
-		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
-		return ret;
-	}
-
-	//bpf_printk("Created domain %d (%p) with node_id %d %d", dom_id, domc->cpumask, node_id, MAX_NUMA_NODES);
-
 	if (node_id >= MAX_NUMA_NODES) {
 		scx_bpf_error("Invalid node %d %d", node_id, MAX_NUMA_NODES);
 		return -ENOENT;
 	}
+#endif
+
+	node_id = 0;
+
+	bpf_printk("dom_id %d", dom_id);
+
+	ret = scx_bpf_create_dsq(dom_id, 0);
+#if 0
+	if (ret < 0) {
+		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
+		return ret;
+	}
+#endif
 
 	domc->node_cpumask = node_data[node_id];
 
 	return 0;
 }
+

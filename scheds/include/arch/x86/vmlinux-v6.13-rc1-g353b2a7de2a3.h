@@ -39535,7 +39535,7 @@ union amd_uncore_info {
 };
 
 struct cpumask {
-	unsigned long bits[128];
+	unsigned long bits[8];
 };
 
 typedef struct cpumask cpumask_t;
