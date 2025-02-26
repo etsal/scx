@@ -68,6 +68,7 @@ const LSTAT_XLAYER_WAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE as us
 const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE as usize;
 const LSTAT_LLC_DRAIN_TRY: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN_TRY as usize;
 const LSTAT_LLC_DRAIN: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN as usize;
+const LSTAT_EPOLL_WAITER: usize = bpf_intf::layer_stat_id_LSTAT_EPOLL_WAITER as usize;
 
 const LLC_LSTAT_LAT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize;
 const LLC_LSTAT_CNT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
@@ -182,6 +183,8 @@ pub struct LayerStats {
     pub llc_drain_try: f64,
     #[stat(desc = "% LLC draining succeeded")]
     pub llc_drain: f64,
+    #[stat(desc = "% Scheduled tasks waking from epoll")]
+    pub epoll_waiter: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
     #[stat(desc = "count of CPUs assigned")]
@@ -289,6 +292,7 @@ impl LayerStats {
             xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
             llc_drain_try: lstat_pct(LSTAT_LLC_DRAIN_TRY),
             llc_drain: lstat_pct(LSTAT_LLC_DRAIN),
+            epoll_waiter: lstat_pct(LSTAT_EPOLL_WAITER),
             cpus: Self::bitvec_to_u32s(layer.cpus.as_raw_bitvec()),
             cur_nr_cpus: layer.cpus.weight() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -397,6 +401,14 @@ impl LayerStats {
             fmt_pct(self.min_exec),
             self.min_exec_us as f64 / 1000.0,
             width = header_width
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  epoll_waiter={}",
+            "",
+            fmt_pct(self.epoll_waiter),
+            width = header_width,
         )?;
 
         let mut cpus = self

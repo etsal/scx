@@ -506,6 +506,50 @@ int rtp_fexit_epoll_wait(struct syscall_trace_exit *unused)
 	return 0;
 }
 
+struct tp_syscall_enter_futex {
+	struct trace_entry ent;
+	int __syscall_nr;
+	u32 __attribute__((btf_type_tag("user"))) * uaddr;
+	int op;
+	u32 val;
+	struct __kernel_timespec __attribute__((btf_type_tag("user"))) * utime;
+	u32 __attribute__((btf_type_tag("user"))) * uaddr2;
+	u32 val3;
+};
+
+struct tp_syscall_exit {
+	struct trace_entry ent;
+	int __syscall_nr;
+	long ret;
+};
+
+SEC("tracepoint/syscalls/sys_enter_futex")
+int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
+{
+	struct task_struct *p = (struct task_struct*)bpf_get_current_task_btf();
+	struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+
+	if (!taskc)
+		return 0;
+
+	taskc->epoll_waiter = true;
+
+	return 0;
+
+}
+
+SEC("tracepoint/syscalls/sys_exit_futex")
+int rtp_sys_exit_futex(struct tp_syscall_exit *ctx)
+{
+	struct task_struct *p = (struct task_struct*)bpf_get_current_task_btf();
+	struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+
+	if (!taskc)
+		return 0;
+
+	taskc->epoll_waiter = false;
+}
+
 /*
  * Because the layer membership is by the default hierarchy cgroups rather than
  * the CPU controller membership, we can't use ops.cgroup_move(). Let's iterate
@@ -1133,6 +1177,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	layer_id = taskc->layer_id;
 	if (!(layer = lookup_layer(layer_id)))
 		return;
+
+	if (taskc->epoll_waiter) {
+		lstat_inc(LSTAT_EPOLL_WAITER, layer, cpuc);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, layer->slice_ns, SCX_ENQ_HEAD);
+		return;
+	}
 
 	if (enq_flags & SCX_ENQ_REENQ) {
 		lstat_inc(LSTAT_ENQ_REENQ, layer, cpuc);
