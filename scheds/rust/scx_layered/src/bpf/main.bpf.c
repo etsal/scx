@@ -479,6 +479,7 @@ int rtp_fenter_epoll_wait(struct syscall_trace_enter *unused)
 		return 0;
 
 	taskc->epoll_waiter = true;
+	taskc->dsq_id = bpf_get_smp_processor_id();
 
 	return 0;
 }
@@ -533,6 +534,7 @@ int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
 		return 0;
 
 	taskc->epoll_waiter = true;
+	taskc->dsq_id = bpf_get_smp_processor_id();
 
 	return 0;
 
@@ -548,6 +550,8 @@ int rtp_sys_exit_futex(struct tp_syscall_exit *ctx)
 		return 0;
 
 	taskc->epoll_waiter = false;
+
+	return 0;
 }
 
 /*
@@ -1180,7 +1184,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (taskc->epoll_waiter) {
 		lstat_inc(LSTAT_EPOLL_WAITER, layer, cpuc);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, layer->slice_ns, SCX_ENQ_HEAD);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | taskc->dsq_id, layer->slice_ns, SCX_ENQ_HEAD);
 		return;
 	}
 
