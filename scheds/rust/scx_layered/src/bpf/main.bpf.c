@@ -426,6 +426,7 @@ struct task_ctx {
 	u64			runtime_avg;
 	u64			dsq_id;
 	u32			llc_id;
+	bool			epoll_waiter;
 
 	/* for llcc->queue_runtime */
 	u32			qrt_layer_id;
@@ -454,6 +455,55 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 
 	return taskc;
+}
+
+struct syscalls_enter_epoll_wait_args {
+	short common_type;
+	char common_flags;
+	char common_preempt_count;
+	int common_pid;
+	int __syscall_nr;
+	int epfd;
+	struct epoll_event __attribute__((btf_type_tag("user"))) * events;
+	int maxevents;
+	int timeout;
+};
+
+SEC("tracepoint/syscalls/sys_enter_epoll_wait")
+int rtp_fenter_epoll_wait(struct syscall_trace_enter *unused)
+{
+	struct task_struct *p = (struct task_struct*)bpf_get_current_task_btf();
+	struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+
+	if (!taskc)
+		return 0;
+
+	taskc->epoll_waiter = true;
+
+	return 0;
+}
+
+struct syscalls_exit_epoll_wait_args {
+	short common_type;
+	char common_flags;
+	char common_preempt_count;
+	int common_pid;
+	int __syscall_nr;
+	long ret;
+};
+
+SEC("tracepoint/syscalls/sys_exit_epoll_wait")
+int rtp_fexit_epoll_wait(struct syscall_trace_exit *unused)
+{
+	struct task_struct *p = (struct task_struct*)bpf_get_current_task_btf();
+	struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+
+	if (!taskc)
+		return 0;
+
+	taskc->epoll_waiter = false;
+
+	return 0;
 }
 
 /*
@@ -1838,7 +1888,7 @@ static __noinline bool match_one(struct layer_match *match,
 
 			if (!enable_gpu_support)
 				return match->using_gpu;
-			
+
 			pid = (u32) p->tgid;
 			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid);
 
