@@ -91,18 +91,20 @@ impl DomainGroup {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
             for (node_id, node) in &top.nodes {
                 for (_, llc) in node.llcs.iter() {
-                    let mask = llc.span.clone();
-                    span |= &mask;
-                    doms.insert(
-                        dom_id,
-                        Domain {
-                            id: dom_id,
-                            mask,
-                            ctx: Arc::new(Mutex::new(None)),
-                        },
-                    );
-                    dom_numa_map.insert(dom_id, *node_id);
-                    dom_id += 1;
+                    for (_, core) in llc.cores.iter() {
+                        let mask = core.span.clone();
+                        span |= &mask;
+                        doms.insert(
+                            dom_id,
+                            Domain {
+                                id: dom_id,
+                                mask,
+                                ctx: Arc::new(Mutex::new(None)),
+                            },
+                        );
+                        dom_numa_map.insert(dom_id, *node_id);
+                        dom_id += 1;
+                    }
                 }
             }
             (doms, top.nodes.len())
