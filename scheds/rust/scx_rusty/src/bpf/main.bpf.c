@@ -13,8 +13,8 @@
  * they are round-robined to a domain.
  *
  * rusty_select_cpu is the primary scheduling logic, invoked when a task
- * becomes runnable. A task's target_dom field is populated by userspace to inform 
- * the BPF scheduler that a task should be migrated to a new domain. Otherwise, 
+ * becomes runnable. A task's target_dom field is populated by userspace to inform
+ * the BPF scheduler that a task should be migrated to a new domain. Otherwise,
  * the task is scheduled in priority order as follows:
  * * The current core if the task was woken up synchronously and there are idle
  *   cpus in the system
@@ -77,6 +77,7 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
+const volatile u32 runtime_threshold = 50 * 1000; /* 50 us */
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched = false;
@@ -942,6 +943,11 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto direct;
 	}
 
+	if (taskc->avg_runtime < runtime_threshold) {
+		cpu = taskc->domc->first_cpu;
+		goto direct;
+	}
+
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
 
 	/* did @p get pulled out to a foreign domain by e.g. greedy execution? */
@@ -1342,8 +1348,11 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 curr_dom = cpu_to_dom_id(cpu), dom;
+	dom_ptr domc;
 	struct pcpu_ctx *pcpuc;
 	u32 my_node;
+
+	sdt_subprog_init_arena();
 
 	/*
 	 * In older kernels, we may receive an ops.dispatch() callback when a
@@ -1354,6 +1363,18 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (unlikely(is_offline_cpu(cpu)))
 		return;
+
+	domc = lookup_dom_ctx(curr_dom);
+	if (!domc) {
+		scx_bpf_error("no domain found");
+		return;
+	}
+
+#if 0
+	/* Don't pull tasks into the time-sensitive domain. */
+	if (cpu == domc->first_cpu)
+		return;
+#endif
 
 	if (scx_bpf_dsq_move_to_local(curr_dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
@@ -1474,7 +1495,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 	domc = task_domain(taskc);
 	if (!domc) {
-		scx_bpf_error("Invalid dom ID");
+		scx_bpf_error("Invalid domain for task %s", p->comm);
 		return;
 	}
 
@@ -1593,8 +1614,13 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 	task_set_preferred_mempolicy_dom_mask(p, taskc);
 	bpf_repeat(nr_doms) {
 		dom = (dom + 1) % nr_doms;
+		dom_ptr domc = lookup_dom_ctx(dom);
+		if (!domc) {
+			scx_bpf_error("dom%d not found", dom);
+			continue;
+		}
 
-		if (cpumask_intersects_domain(cpumask, dom)) {
+		if (cpumask_intersects_domain(cpumask, dom) || bpf_cpumask_test_cpu(domc->first_cpu, cpumask)) {
 			taskc->dom_mask |= 1LLU << dom;
 			/*
 			 * The starting point is round-robin'd and the first
@@ -1824,6 +1850,7 @@ __weak s32 create_dom(u32 dom_id)
 		return -ENOENT;
 	}
 
+	domc->first_cpu = MAX_CPUS;
 	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *dmask;
 		bool cpu_in_domain;
@@ -1839,7 +1866,19 @@ __weak s32 create_dom(u32 dom_id)
 		if (!cpu_in_domain)
 			continue;
 
+#if 0
+		/*
+		 * The first CPU in a domain is off-limits.
+		 */
+		if (domc->first_cpu < MAX_CPUS)
+			bpf_cpumask_set_cpu(cpu, dom_mask);
+		else
+			domc->first_cpu = cpu;
+#endif
 		bpf_cpumask_set_cpu(cpu, dom_mask);
+		if (domc->first_cpu == MAX_CPUS)
+			domc->first_cpu = cpu;
+
 		bpf_cpumask_set_cpu(cpu, all_mask);
 
 		/*
@@ -1885,6 +1924,7 @@ __weak s32 create_dom(u32 dom_id)
 static s32 initialize_cpu(s32 cpu)
 {
 	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
+	dom_ptr domc;
 	u32 i;
 
 	if (!pcpuc)
@@ -1909,7 +1949,14 @@ static s32 initialize_cpu(s32 cpu)
 
 		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(lb_domain->cpumask));
 		bpf_rcu_read_unlock();
-		if (in_dom) {
+
+		domc = lookup_dom_ctx(i);
+		if (!domc) {
+			scx_bpf_error("uninitialized dom%d", i);
+			return -ENOENT;
+		}
+
+		if (in_dom || domc->first_cpu == cpu) {
 			pcpuc->dom_id = i;
 			return 0;
 		}

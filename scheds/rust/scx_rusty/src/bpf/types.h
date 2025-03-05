@@ -88,6 +88,7 @@ struct dom_active_tasks {
 struct dom_ctx {
 	u32 id;
 	u64 min_vruntime;
+	u64 first_cpu;
 
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
