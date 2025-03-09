@@ -732,6 +732,10 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 {
 	u64 cpus_seq = READ_ONCE(unprotected_seq);
 
+	/* Do we have our own unprotected CPU mask? */
+	if (!taskc->layered_unprotected_mask)
+		return;
+
 	if (should_refresh_cached_cpus(&taskc->layered_cpus_unprotected, 0, cpus_seq)) {
 		refresh_cached_cpus(taskc->layered_unprotected_mask,
 				    &taskc->layered_cpus_unprotected, 0, cpus_seq,
@@ -854,6 +858,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  bool from_selcpu)
 {
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
+	struct bpf_cpumask *unprot_mask;
 	struct cpu_ctx *prev_cpuc;
 	u32 layer_id = layer->id;
 	u64 cpus_seq;
@@ -906,14 +911,21 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
 		} else {
 			maybe_refresh_layered_cpus_unprotected(p, taskc);
-			if (unlikely(!taskc->layered_unprotected_mask)) {
-				scx_bpf_error("task has no layered_unprotected_mask");
+			/*
+			 * Use the task's idle unprotected mask if available, otherwise
+			 * use the global one.
+			 */
+			unprot_mask = taskc->layered_unprotected_mask;
+			if (!unprot_mask)
+				unprot_mask = unprotected_cpumask;
+
+			if (unlikely(!unprot_mask)) {
+				scx_bpf_error("unprotected_cpumask not initialized");
 				scx_bpf_put_idle_cpumask(cpumask);
 				return -1;
 			}
 
-
-			has_idle = bpf_cpumask_intersects(cast_mask(taskc->layered_unprotected_mask), cpumask);
+			has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask);
 		}
 
 		scx_bpf_put_idle_cpumask(cpumask);
@@ -980,7 +992,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED) {
 	    maybe_refresh_layered_cpus_unprotected(p, taskc);
-	    if ((cpu = pick_idle_cpu_from(cast_mask(taskc->layered_unprotected_mask), prev_cpu, idle_smtmask)) >= 0) {
+	    unprot_mask = taskc->layered_unprotected_mask;
+	    if (!unprot_mask)
+		    unprot_mask = unprotected_cpumask;
+
+	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	    }
@@ -2531,6 +2547,41 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 	}
 }
 
+static int init_cached_cpus(struct cached_cpus *ccpus)
+{
+	ccpus->id = -1;
+
+	return 0;
+}
+
+static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_ctx *taskc)
+{
+	struct bpf_cpumask *cpumask;
+	int ret;
+
+	/* We don't need our own mask, we have no placement restrictions. */
+	if (bpf_cpumask_full(p->cpus_ptr))
+		return 0;
+
+	/* Already initialized. */
+	if (taskc->layered_unprotected_mask)
+		return 0;
+
+	ret = init_cached_cpus(&taskc->layered_cpus_unprotected);
+	if (ret)
+		return ret;
+
+	if (!(cpumask = bpf_cpumask_create()))
+		return -ENOMEM;
+
+	if ((cpumask = bpf_kptr_xchg(&taskc->layered_unprotected_mask, cpumask))) {
+		bpf_cpumask_release(cpumask);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -2546,6 +2597,8 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
 	taskc->layered_cpus_unprotected.seq = -1;
+
+	maybe_init_task_unprotected_mask(p, taskc);
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
@@ -2563,13 +2616,6 @@ void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
 	scx_bpf_reenqueue_local();
-}
-
-static int init_cached_cpus(struct cached_cpus *ccpus)
-{
-	ccpus->id = -1;
-
-	return 0;
 }
 
 s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
@@ -2630,18 +2676,10 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
-	// Unprotected CPU idle mask setup
-	ret = init_cached_cpus(&taskc->layered_cpus_unprotected);
+	// Unprotected CPU idle mask setup if necessary
+	ret = maybe_init_task_unprotected_mask(p, taskc);
 	if (ret)
 		return ret;
-
-	if (!(cpumask = bpf_cpumask_create()))
-		return -ENOMEM;
-
-	if ((cpumask = bpf_kptr_xchg(&taskc->layered_unprotected_mask, cpumask))) {
-		bpf_cpumask_release(cpumask);
-		return -EINVAL;
-	}
 
 	taskc->pid = p->pid;
 	taskc->last_cpu = -1;
