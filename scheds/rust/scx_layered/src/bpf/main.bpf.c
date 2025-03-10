@@ -1070,6 +1070,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
 		return prev_cpu;
 
+	if (layer->rr) {
+		taskc->dsq_id = SCX_DSQ_LOCAL_ON | taskc->last_cpu;
+		return taskc->last_cpu;
+	}
+
 	cpu = pick_idle_cpu(p, prev_cpu, cpuc, taskc, layer, true);
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
@@ -1228,6 +1233,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (try_preempt_first && wakeup && !yielding &&
 	    try_preempt_cpu(task_cpu, p, taskc, layer, true))
 		return;
+
+	if (layer->rr) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | taskc->dsq_id, layer->slice_ns, 0);
+		return;
+	}
 
 	/*
 	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
@@ -1845,6 +1855,10 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 		/* owner layer */
 		if (owner_layer) {
+			/* If in a round-robin layer, don't try to pull from other layers. */
+			if (owner_layer->rr)
+				return;
+
 			if (owner_layer->llcs_to_drain &&
 			    try_drain_layer_llcs(owner_layer, cpuc))
 				return;
@@ -2071,7 +2085,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 	u64 layer_id;	// XXX - int makes verifier unhappy
 	pid_t pid = p->pid;
 
-	if (!taskc->refresh_layer)
+	if (!taskc->refresh_layer && taskc->last_cpu < 0)
 		return;
 	taskc->refresh_layer = false;
 
@@ -2096,6 +2110,21 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 		if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
 		    !(llcc = lookup_llc_ctx(cpuc->llc_id)))
 			return;
+
+		/* We have no previous CPU, round robin a new one. */
+		if (layer->rr && taskc->last_cpu < 0) {
+			struct layer_cpumask_wrapper *cpumaskw;
+			struct bpf_cpumask *cpumask;
+
+			if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
+			    !(cpumask = cpumaskw->cpumask)) {
+				scx_bpf_error("can't happen");
+				return;
+			}
+
+			taskc->last_cpu = bpf_cpumask_any_distribute(cast_mask(cpumask));
+			taskc->dsq_id = SCX_DSQ_LOCAL_ON | taskc->last_cpu;
+		}
 
 		taskc->layer_id = layer_id;
 		taskc->llc_id = cpuc->llc_id;

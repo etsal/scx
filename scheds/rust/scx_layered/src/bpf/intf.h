@@ -42,9 +42,10 @@ enum consts {
 	RUNTIME_DECAY_FACTOR	= 4,
 	LAYER_LAT_DECAY_FACTOR	= 32,
 
-	DSQ_ID_SPECIAL_MASK	= 0xc0000000,
+	DSQ_ID_SPECIAL_MASK	= 0xe0000000,
 	HI_FB_DSQ_BASE		= 0x40000000,
 	LO_FB_DSQ_BASE		= 0x80000000,
+	STICKY_DSQ_BASE		= 0x20000000,
 
 	DSQ_ID_LAYER_SHIFT	= 16,
 	DSQ_ID_LLC_MASK		= (1LLU << DSQ_ID_LAYER_SHIFT) - 1,		/* 0x0000ffff */
@@ -327,6 +328,7 @@ struct layer {
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
+	bool			rr;
 };
 
 struct scx_cmd {

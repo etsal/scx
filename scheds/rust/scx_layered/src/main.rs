@@ -123,6 +123,7 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        rr: false,
                     },
                 },
             },
@@ -152,6 +153,7 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        rr: false,
                     },
                 },
             },
@@ -184,6 +186,7 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        rr: false,
                     },
                 },
             },
@@ -213,6 +216,7 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        rr: false,
                     },
                 },
             },
@@ -1264,6 +1268,7 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    rr,
                     ..
                 } = spec.kind.common();
 
@@ -1304,6 +1309,7 @@ impl<'a> Scheduler<'a> {
                     }
                     layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
+                layer.rr.write(*rr);
             }
 
             layer.is_protected.write(match spec.kind {

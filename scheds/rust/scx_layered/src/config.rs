@@ -116,6 +116,8 @@ pub struct LayerCommon {
     pub nodes: Vec<usize>,
     #[serde(default)]
     pub llcs: Vec<usize>,
+    #[serde(default)]
+    pub rr: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

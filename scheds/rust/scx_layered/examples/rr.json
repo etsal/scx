@@ -1,0 +1,28 @@
+[
+	{
+		"name": "rr",
+		"matches": [
+			[{ "PcommPrefix": "stress-ng" }]
+		],
+		"kind": {
+			"Confined": {
+				"cpus_range":  [4, 4],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "RandomTopo",
+				"protected": true,
+				"rr": true
+			}
+		}
+	},
+	{
+		"name": "rest",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]
