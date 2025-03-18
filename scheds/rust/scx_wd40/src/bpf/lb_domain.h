@@ -57,3 +57,5 @@ struct pcpu_ctx {
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];
+__weak int start_perf_counter(struct task_struct *p);
+__weak int stop_perf_counter(struct task_struct *p);

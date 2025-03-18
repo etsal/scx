@@ -1,0 +1,67 @@
+/* Copyright (c) Meta Platforms, Inc. and affiliates. */
+/*
+ * This software may be used and distributed according to the terms of the
+ * GNU General Public License version 2.
+ */
+
+#include <scx/common.bpf.h>
+#include <scx/ravg_impl.bpf.h>
+#include <lib/sdt_task.h>
+
+#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_spin_lock.h>
+
+#include "cpumask.h"
+
+#include "intf.h"
+#include "types.h"
+#include "lb_domain.h"
+#include "deadline.h"
+
+#include "percpu.h"
+
+#include <scx/bpf_arena_common.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(max_entries, MAX_CPUS);
+	__type(key, int);
+	__type(value, int);
+} events SEC(".maps");
+
+__weak int start_perf_counter(struct task_struct *p __arg_trusted)
+{
+	struct bpf_perf_event_value value;
+	task_ptr taskc;
+
+	if (!(taskc = lookup_task_ctx(p)))
+		return 0;
+
+	bpf_perf_event_read_value(&events, 0, &value, sizeof(value));
+	if (!value.enabled || !value.running)
+		return 0;
+
+	taskc->counter_start = value.counter;
+
+	return 0;
+}
+
+__weak int stop_perf_counter(struct task_struct *p __arg_trusted)
+{
+	struct bpf_perf_event_value value;
+	task_ptr taskc;
+
+	if (!(taskc = lookup_task_ctx(p)))
+		return 0;
+
+	bpf_perf_event_read_value(&events, 0, &value, sizeof(value));
+	if (!value.enabled || !value.running)
+		return 0;
+
+	taskc->counter_aggregate += value.counter - taskc->counter_start;
+
+	return 0;
+}
+

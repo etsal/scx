@@ -713,6 +713,7 @@ void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 		return;
 
 	running_update_vtime(p, taskc);
+	start_perf_counter(p);
 }
 
 void BPF_STRUCT_OPS(wd40_stopping, struct task_struct *p, bool runnable)
@@ -721,6 +722,7 @@ void BPF_STRUCT_OPS(wd40_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	stopping_update_vtime(p);
+	stop_perf_counter(p);
 }
 
 void BPF_STRUCT_OPS(wd40_quiescent, struct task_struct *p, u64 deq_flags)
