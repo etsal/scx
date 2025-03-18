@@ -58,6 +58,8 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
+use perf_event_open_sys as perf;
+
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
@@ -433,6 +435,29 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.wd40_perf_mode = opts.perf;
 
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
+
+        for cpu in 0..skel.maps.rodata_data.nr_cpu_ids {
+            let mut attrs = perf::bindings::perf_event_attr::default();
+            attrs.type_ = perf::bindings::PERF_TYPE_HARDWARE;
+            attrs.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+            attrs.set_freq(0);
+            attrs.set_disabled(0);
+            attrs.set_exclude_kernel(0);
+            attrs.set_exclude_hv(0);
+            attrs.set_inherit(0);
+            attrs.set_pinned(0);
+            let fd = unsafe { perf::perf_event_open(&mut attrs, -1, cpu as i32, -1, 0) };
+            if fd < 0 {
+                bail!("Error {} when opening perf file", fd);
+            }
+
+            let key = unsafe { std::mem::transmute::<u32, [u8; 4]>(cpu as u32) };
+            let value = unsafe { std::mem::transmute::<u32, [u8; 4]>(fd as u32) };
+            skel.maps
+                .events
+                .update(&key, &value, libbpf_rs::MapFlags::ANY)
+                .context("Failed to set up CPU {} event fd", cpu)?;
+        }
 
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
