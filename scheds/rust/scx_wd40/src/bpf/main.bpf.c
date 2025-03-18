@@ -814,6 +814,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted
 void BPF_STRUCT_OPS(wd40_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
+	task_ptr taskc;
+
+	if ((taskc = lookup_task_ctx(p)))
+		bpf_printk("Total cycles run: %lu %lu", taskc->counter_aggregate, taskc->counter_start);
+
 	sdt_task_free(p);
 }
 

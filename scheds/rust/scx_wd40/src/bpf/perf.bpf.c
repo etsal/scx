@@ -35,14 +35,24 @@ __weak int start_perf_counter(struct task_struct *p __arg_trusted)
 {
 	struct bpf_perf_event_value value;
 	task_ptr taskc;
+	int err;
+	u32 id;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return 0;
 
-	bpf_perf_event_read_value(&events, 0, &value, sizeof(value));
+	id = bpf_get_smp_processor_id();
+
+	err = bpf_perf_event_read_value(&events, id, &value, sizeof(value));
+	if (err) {
+		scx_bpf_error("counter read error %d", err);
+		return 0;
+	}
+
 	if (!value.enabled || !value.running)
 		return 0;
 
+	bpf_printk("Start %ld", value.counter);
 	taskc->counter_start = value.counter;
 
 	return 0;
@@ -52,15 +62,25 @@ __weak int stop_perf_counter(struct task_struct *p __arg_trusted)
 {
 	struct bpf_perf_event_value value;
 	task_ptr taskc;
+	int err;
+	u32 id;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return 0;
 
-	bpf_perf_event_read_value(&events, 0, &value, sizeof(value));
+	id = bpf_get_smp_processor_id();
+
+	err = bpf_perf_event_read_value(&events, id, &value, sizeof(value));
+	if (err) {
+		scx_bpf_error("counter read error %d", err);
+		return 0;
+	}
+
 	if (!value.enabled || !value.running)
 		return 0;
 
 	taskc->counter_aggregate += value.counter - taskc->counter_start;
+	bpf_printk("Delta %ld", taskc->counter_aggregate, taskc->counter_start);
 
 	return 0;
 }

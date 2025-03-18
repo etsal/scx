@@ -972,6 +972,7 @@ name = "scx_wd40"
 version = "1.0.10"
 dependencies = [
  "anyhow",
+ "bitvec",
  "chrono",
  "clap",
  "crossbeam",
