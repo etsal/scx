@@ -47,6 +47,9 @@ struct task_ctx {
 	struct ravg_data dcyc_rd;
 
 	scx_bitmap_t cpumask;
+
+	u64 counter_start;
+	u64 counter_aggregate;
 };
 
 typedef struct task_ctx __arena *task_ptr;
