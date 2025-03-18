@@ -59,6 +59,7 @@ use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
 use perf_event_open_sys as perf;
+use perf_event_open_sys::bindings::{PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_ACCESS};
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -438,12 +439,12 @@ impl<'a> Scheduler<'a> {
 
         for cpu in 0..skel.maps.rodata_data.nr_cpu_ids {
             let mut attrs = perf::bindings::perf_event_attr::default();
-            attrs.type_ = perf::bindings::PERF_TYPE_HARDWARE;
-            attrs.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+            attrs.type_ = perf::bindings::PERF_TYPE_HW_CACHE;
+            attrs.config = (PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) | (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16)) as u64;
             attrs.set_freq(0);
             attrs.set_disabled(0);
             attrs.set_exclude_kernel(0);
-            attrs.set_exclude_hv(0);
+            attrs.set_exclude_hv(1);
             attrs.set_inherit(0);
             attrs.set_pinned(0);
             let fd = unsafe { perf::perf_event_open(&mut attrs, -1, cpu as i32, -1, 0) };
@@ -456,7 +457,7 @@ impl<'a> Scheduler<'a> {
             skel.maps
                 .events
                 .update(&key, &value, libbpf_rs::MapFlags::ANY)
-                .context("Failed to set up CPU {} event fd", cpu)?;
+                .context("Failed to set up CPU event fd")?;
         }
 
         // Allocate the arena memory from the BPF side so userspace initializes it before starting

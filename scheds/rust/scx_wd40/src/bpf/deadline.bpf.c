@@ -293,10 +293,8 @@ void running_update_vtime(struct task_struct *p, task_ptr taskc)
 	dom_ptr domc;
 	int ret;
 
-	if (!(domc = taskc->domc)) {
-		scx_bpf_error("no domain for task");
+	if (!(domc = taskc->domc))
 		return;
-	}
 
 	if (!(lock = domc->vtime_lock))
 		return;
