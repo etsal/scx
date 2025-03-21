@@ -59,7 +59,6 @@ use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
 use perf_event_open_sys as perf;
-use perf_event_open_sys::bindings::{PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_ACCESS};
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -439,15 +438,22 @@ impl<'a> Scheduler<'a> {
 
         for cpu in 0..skel.maps.rodata_data.nr_cpu_ids {
             let mut attrs = perf::bindings::perf_event_attr::default();
-            attrs.type_ = perf::bindings::PERF_TYPE_HW_CACHE;
-            attrs.config = (PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) | (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16)) as u64;
+
+            // XXX Found from /sys/bus/event_source/devices/amd_l3 (well actually snooped from
+            // strace and confirmed after the fact). Config bitfields from the AMD PPR.
+            // XXX Update: Moving to AMD IBS
+            attrs.type_ = 0xb;
+            // 0xff is "all events", 04 is the PMC number.
+            attrs.config = 0xff04 as u64;
+            attrs.size = 0x88; // 112 since 4.1
+            attrs.sample_type = perf::bindings::PERF_SAMPLE_IDENTIFIER as u64;
             attrs.set_freq(0);
             attrs.set_disabled(0);
             attrs.set_exclude_kernel(0);
             attrs.set_exclude_hv(1);
             attrs.set_inherit(0);
             attrs.set_pinned(0);
-            let fd = unsafe { perf::perf_event_open(&mut attrs, -1, cpu as i32, -1, 0) };
+            let fd = unsafe { perf::perf_event_open(&mut attrs, -1, cpu as i32, -1, perf::bindings::PERF_FLAG_FD_CLOEXEC as u64) };
             if fd < 0 {
                 bail!("Error {} when opening perf file", fd);
             }
