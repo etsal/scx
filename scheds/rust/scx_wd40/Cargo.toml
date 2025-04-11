@@ -35,3 +35,7 @@ enable_backtrace = []
 non_canonical_partial_ord_impl = "allow"
 
 [workspace]
+
+[build]
+rustc-wrapper = "/$HOME/.cargo/bin/sccache"
+jobs = 32

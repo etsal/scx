@@ -973,30 +973,29 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 }
 
 __hidden
-int scx_buddy_init(struct scx_buddy *buddy, size_t size)
+int scx_buddy_init(struct scx_buddy *buddy)
 {
+	size_t alloc_size, pages_requested;
 	scx_buddy_chunk_t *chunk;
 	int ret;
 
-	/* Set a minimum allocation size. */
-	if (size < SCX_BUDDY_MIN_ALLOC_BYTES)
-		return -EINVAL;
-
 	bpf_spin_lock(&buddy->lock);
 	/* Check if already initialized. */
-	if (buddy->min_alloc_bytes) {
+	if (buddy->ready) {
 		bpf_spin_unlock(&buddy->lock);
 		return -EALREADY;
 	}
 
-	buddy->min_alloc_bytes = size;
+	buddy->ready = true;
 	bpf_spin_unlock(&buddy->lock);
 
 	/* One allocation per chunk. */
-	ret = scx_stk_init(&buddy->stack, SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE, SCX_BUDDY_CHUNK_PAGES);
+	alloc_size = SCX_BUDDY_MIN_ALLOC_BYTES * SCX_BUDDY_CHUNK_ITEMS;
+	pages_requested = div_round_up(alloc_size, PAGE_SIZE);
+	ret = scx_stk_init(&buddy->stack, alloc_size, pages_requested);
 	if (ret) {
 		bpf_spin_lock(&buddy->lock);
-		buddy->min_alloc_bytes = 0;
+		buddy->ready = false;
 		bpf_spin_unlock(&buddy->lock);
 		return ret;
 	}
@@ -1012,7 +1011,7 @@ int scx_buddy_init(struct scx_buddy *buddy, size_t size)
 		buddy->first_chunk = chunk;
 	} else {
 		/* Mark as uninitialized. */
-		buddy->min_alloc_bytes = 0;
+		buddy->ready = false;
 		buddy->first_chunk = NULL;
 	}
 

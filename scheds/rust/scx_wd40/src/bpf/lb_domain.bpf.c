@@ -45,7 +45,7 @@ private(LBDOMAIN_BUDDY) struct scx_buddy buddy;
 __weak
 int lb_domain_init(void)
 {
-	if (scx_buddy_init(&buddy, PAGE_SIZE)) {
+	if (scx_buddy_init(&buddy)) {
 		scx_bpf_error("failed to initialize buddy allocator");
 		bpf_printk("failed to initialize buddy allocator");
 	}
