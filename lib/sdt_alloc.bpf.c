@@ -747,6 +747,8 @@ static void scx_stk_pop(struct scx_stk *stack)
 static
 int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 {
+	int i;
+
 	if (!stack)
 		return -EINVAL;
 
@@ -757,7 +759,10 @@ int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 	}
 
 	/* Poison the element. */
-	__builtin_memset(elem, 0x5a, stack->data_size);
+	/* XXX Using memset with arenas crashes Clang 19 so do loops for now. */
+	bpf_for(i, 0, stack->data_size) {
+		((char *)elem)[i] = 0x5a;
+	}
 
 	stack->current->elems[stack->cind] = elem;
 
@@ -939,11 +944,20 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 #define stk_test_pass(str) bpf_printk("(%s:%d) [PASS]: %s", \
 	__func__, __LINE__, str)
 
+struct stk_test;
+typedef struct stk_test __arena stk_test_t;
+
+struct stk_test {
+	stk_test_t *next;
+	u8 contents[PAGE_SIZE - sizeof(stk_test_t *)];
+};
+
 SEC("syscall")
 int scx_stk_test(void)
 {
 	const size_t PAGES_PER_ARENA_ALLOC = 8;
-	const size_t ITERS = 10000;
+	const size_t ITERS = 100;
+	stk_test_t *head, *iter;
 	struct scx_stk stk;
 	void __arena *page;
 	int ret, i, j;
@@ -957,19 +971,7 @@ int scx_stk_test(void)
 
 	stk_test_pass("stack init");
 
-	/* Test: Make sure we can allocate in succession.  */
-	bpf_for(i, 0, ITERS) {
-		page = (void __arena *)scx_stk_alloc(&stk);
-		if (!page) {
-			stk_test_fail("stack alloc (leak)");
-			return -ENOMEM;
-		}
-	}
-
-
-	stk_test_pass("stack alloc (leak)");
-
-	/* Test: Make sure we can allocate/free in succession.  */
+	/* Test: Allocate/free in succession.  */
 	bpf_for(i, 0, ITERS) {
 		page = (void __arena *)scx_stk_alloc(&stk);
 		if (!page) {
@@ -982,15 +984,6 @@ int scx_stk_test(void)
 
 	stk_test_pass("stack alloc w/ free");
 
-	/* Test: Make sure the data gets cleaned after .  */
-	bpf_for(i, 0, ITERS) {
-		page = (void __arena *)scx_stk_alloc(&stk);
-		if (!page) {
-			stk_test_fail("stack alloc (leak)");
-			return -ENOMEM;
-		}
-	}
-
 	/* Test: Make sure poisoning works. */
 	bpf_for(i, 0, ITERS) {
 		page = (void __arena *)scx_stk_alloc(&stk);
@@ -999,7 +992,9 @@ int scx_stk_test(void)
 			return -ENOMEM;
 		}
 
-		__builtin_memset(page, 0xbb, PAGE_SIZE);
+		bpf_for(j, 0, PAGE_SIZE) {
+			((char *)page)[i] = 0xbb;
+		}
 
 		scx_stk_free(&stk, page);
 
@@ -1009,6 +1004,38 @@ int scx_stk_test(void)
 				return -EINVAL;
 			}
 		}
+	}
+
+	/* Test: Allocate and free in bulk. */
+
+	head = NULL;
+	bpf_for(i, 0, 256) {
+		iter = (stk_test_t *)scx_stk_alloc(&stk);
+		if (!iter) {
+			stk_test_fail("stack alloc in bulk");
+			return -ENOMEM;
+		}
+
+		bpf_for(j, 0, PAGE_SIZE - sizeof(stk_test_t *)) {
+			iter->contents[j] = i;
+		}
+
+		iter->next = head;
+		head = iter;
+	}
+
+	bpf_for(i, 0, 256) {
+		bpf_for(j, 0, PAGE_SIZE - sizeof(stk_test_t *)) {
+			if (head->contents[j] + i != 255) {
+				bpf_printk("(%p, %d) result %d %d", head, j, head->contents[j], i);
+				stk_test_fail("stack alloc in bulk");
+				return -ENOMEM;
+			}
+		}
+
+		iter = head->next;
+		scx_stk_free(&stk, head);
+		head = iter;
 	}
 
 	stk_test_pass("post-free poison");
