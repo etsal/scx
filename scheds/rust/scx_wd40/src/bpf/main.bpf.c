@@ -71,6 +71,14 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
+#include "../../../../../lib/cpumask.bpf.c"
+#include "../../../../../lib/sdt_alloc.bpf.c"
+#include "../../../../../lib/sdt_task.bpf.c"
+#include "deadline.bpf.c"
+#include "lb_domain.bpf.c"
+#include "placement.bpf.c"
+#include "common.bpf.c"
+
 /*
  * const volatiles are set during initialization and treated as consts by the
  * jit compiler.
