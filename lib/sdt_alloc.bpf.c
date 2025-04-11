@@ -756,6 +756,9 @@ int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 		return 0;
 	}
 
+	/* Poison the element. */
+	__builtin_memset(elem, 0x5a, stack->data_size);
+
 	stack->current->elems[stack->cind] = elem;
 
 	scx_stk_push(stack);
@@ -930,6 +933,88 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 	return (u64)elem;
 }
 
+#define stk_test_fail(errstr) bpf_printk("(%s:%d) [FAIL]: %s", \
+	__func__, __LINE__, errstr)
+
+#define stk_test_pass(str) bpf_printk("(%s:%d) [PASS]: %s", \
+	__func__, __LINE__, str)
+
+SEC("syscall")
+int scx_stk_test(void)
+{
+	const size_t PAGES_PER_ARENA_ALLOC = 8;
+	const size_t ITERS = 10000;
+	struct scx_stk stk;
+	void __arena *page;
+	int ret, i, j;
+
+	/* Test: Start up the allocator. */
+	ret = scx_stk_init(&stk, PAGE_SIZE, PAGES_PER_ARENA_ALLOC);
+	if (ret) {
+		stk_test_fail("stack init");
+		return ret;
+	}
+
+	stk_test_pass("stack init");
+
+	/* Test: Make sure we can allocate in succession.  */
+	bpf_for(i, 0, ITERS) {
+		page = (void __arena *)scx_stk_alloc(&stk);
+		if (!page) {
+			stk_test_fail("stack alloc (leak)");
+			return -ENOMEM;
+		}
+	}
+
+
+	stk_test_pass("stack alloc (leak)");
+
+	/* Test: Make sure we can allocate/free in succession.  */
+	bpf_for(i, 0, ITERS) {
+		page = (void __arena *)scx_stk_alloc(&stk);
+		if (!page) {
+			stk_test_fail("stack alloc w/ free");
+			return -ENOMEM;
+		}
+
+		scx_stk_free(&stk, page);
+	}
+
+	stk_test_pass("stack alloc w/ free");
+
+	/* Test: Make sure the data gets cleaned after .  */
+	bpf_for(i, 0, ITERS) {
+		page = (void __arena *)scx_stk_alloc(&stk);
+		if (!page) {
+			stk_test_fail("stack alloc (leak)");
+			return -ENOMEM;
+		}
+	}
+
+	/* Test: Make sure poisoning works. */
+	bpf_for(i, 0, ITERS) {
+		page = (void __arena *)scx_stk_alloc(&stk);
+		if (!page) {
+			stk_test_fail("stack alloc w/ free");
+			return -ENOMEM;
+		}
+
+		__builtin_memset(page, 0xbb, PAGE_SIZE);
+
+		scx_stk_free(&stk, page);
+
+		bpf_for(j, 0, PAGE_SIZE) {
+			if (((char __arena *)page)[j] != 0x5a) {
+				stk_test_fail("post-free poison");
+				return -EINVAL;
+			}
+		}
+	}
+
+	stk_test_pass("post-free poison");
+
+	return 0;
+}
 
 static
 scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)

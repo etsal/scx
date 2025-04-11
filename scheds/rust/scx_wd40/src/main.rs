@@ -448,10 +448,18 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        println!(
-            "Mask length {} NR_CPU_IDS {}",
-            skel.maps.bss_data.mask_size, skel.maps.rodata_data.nr_cpu_ids
-        );
+        // Test the stack allocator.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.scx_stk_test.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Arena-backed stack allocator test failed, scx_stk_test returned {}",
+                output.return_value as i32
+            );
+        }
+
         // Read the mask length chosen by BPF. We count elements in the u64 array, like the BPF
         // program does.
         //
