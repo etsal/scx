@@ -447,11 +447,12 @@ impl<'a> Scheduler<'a> {
             attrs.config = 0 as u64;
             attrs.size = 0x88; // 112 since 4.1
             attrs.sample_type = perf::bindings::PERF_SAMPLE_IP as u64 | perf::bindings::PERF_SAMPLE_CPU as u64 | perf::bindings::PERF_SAMPLE_DATA_SRC as u64;
-            attrs.set_freq(4000);
+            attrs.sample_period = 4000;
             attrs.read_format = perf::bindings::PERF_FORMAT_ID as u64;
-            attrs.set_disabled(1);
+            attrs.set_disabled(0);
+            attrs.set_exclude_user(0);
             attrs.set_exclude_kernel(0);
-            attrs.set_exclude_hv(1);
+            attrs.set_exclude_hv(0);
             attrs.set_inherit(0);
             attrs.set_inherit(0);
             attrs.set_pinned(0);
