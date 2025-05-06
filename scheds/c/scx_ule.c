@@ -5,12 +5,18 @@
  * Copyright (c) 2025 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
+#include <sys/sysinfo.h>
+#include <linux/limits.h>
+
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
 #include <libgen.h>
 #include <bpf/bpf.h>
+
 #include <scx/common.h>
+
+#include "scx_ule.h"
 #include "scx_ule.bpf.skel.h"
 
 const char help_fmt[] =
@@ -38,6 +44,26 @@ static void sigint_handler(int sig)
 	exit_req = 1;
 }
 
+static void set_online_cpus(struct scx_ule *skel)
+{
+	const char *fmt = "/sys/devices/system/cpu/cpu%d";
+	char buf[PATH_MAX];
+	int ncpus;
+	int i;
+
+	ncpus = sysconf(_SC_NPROCESSORS_CONF);
+	skel->bss->nr_cpu_ids = ncpus;
+	
+	for (i = 0; i < ncpus; i++) {
+		snprintf(buf, PATH_MAX, fmt, i);
+		/* If > 0 the file does not exist. */
+		if (access(buf, F_OK))
+			continue;
+		
+		skel->bss->cpu_ctx[i].online = true;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	struct scx_ule *skel;
@@ -62,7 +88,11 @@ restart:
 		}
 	}
 
+
 	SCX_OPS_LOAD(skel, sdt_ops, scx_ule, uei);
+
+	set_online_cpus(skel);
+
 	link = SCX_OPS_ATTACH(skel, sdt_ops, scx_ule);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {

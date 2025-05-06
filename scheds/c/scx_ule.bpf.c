@@ -9,8 +9,6 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-#define SHARED_DSQ 0
-
 #define DEFINE_SDT_STAT(metric)			\
 static inline void				\
 stat_inc_##metric(task_ptr taskc)		\
@@ -22,6 +20,22 @@ __u64 stat_##metric;				\
 DEFINE_SDT_STAT(enqueue);
 DEFINE_SDT_STAT(select_idle_cpu);
 DEFINE_SDT_STAT(select_busy_cpu);
+
+volatile int nr_cpu_ids;
+struct cpu_ctx cpu_ctx[MAX_CPUS];
+
+/* XXX We have no policy yet so just use the DSQ from teh first CPU. */
+#define SHARED_DSQ (0)
+
+static struct cpu_ctx *lookup_cpu_ctx(s32 cpu)
+{
+	if (cpu >= nr_cpu_ids || cpu >= MAX_CPUS) {
+		scx_bpf_error("Failed to lookup cpu ctx for %d", cpu);
+		return NULL;
+	}
+
+	return &cpu_ctx[cpu];
+}
 
 s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
@@ -86,9 +100,39 @@ void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 	scx_task_free(p);
 }
 
+static s32 cpu_init(s32 cpu)
+{
+	struct cpu_ctx *cpu_ctx;
+	int ret;
+
+	cpu_ctx = lookup_cpu_ctx(cpu);
+	if (!cpu_ctx)
+		return -ENOENT;
+
+	if (!cpu_ctx->online)
+		return 0;
+
+	cpu_ctx->dsq_interactive = 2 * cpu;
+	cpu_ctx->dsq_timeshare = 2 * cpu + 1;
+
+	ret = scx_bpf_create_dsq(cpu_ctx->dsq_interactive, NUMA_NODE_ANY);
+	if (ret) {
+		scx_bpf_error("cpu %d: error %d on dsq_interactive creation", cpu, ret);
+		return ret;
+	}
+
+	ret = scx_bpf_create_dsq(cpu_ctx->dsq_interactive, NUMA_NODE_ANY);
+	if (ret) {
+		scx_bpf_error("cpu %d: error %d on dsq_interactive creation", cpu, ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
-	int ret;
+	int ret, i;
 
 	ret = scx_task_init(sizeof(struct task_ctx));
 	if (ret < 0) {
@@ -96,7 +140,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 		return ret;
 	}
 
-	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+	bpf_for(i, 0, nr_cpu_ids) {
+		ret = cpu_init(i);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(sdt_exit, struct scx_exit_info *ei)
