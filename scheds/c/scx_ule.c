@@ -75,7 +75,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
 restart:
-	skel = SCX_OPS_OPEN(sdt_ops, scx_ule);
+	skel = SCX_OPS_OPEN(ule_ops, scx_ule);
 
 	while ((opt = getopt(argc, argv, "fvh")) != -1) {
 		switch (opt) {
@@ -89,11 +89,11 @@ restart:
 	}
 
 
-	SCX_OPS_LOAD(skel, sdt_ops, scx_ule, uei);
+	SCX_OPS_LOAD(skel, ule_ops, scx_ule, uei);
 
 	set_online_cpus(skel);
 
-	link = SCX_OPS_ATTACH(skel, sdt_ops, scx_ule);
+	link = SCX_OPS_ATTACH(skel, ule_ops, scx_ule);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		printf("====ALLOCATION STATS====\n");

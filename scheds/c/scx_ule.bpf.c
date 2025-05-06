@@ -9,7 +9,7 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-#define DEFINE_SDT_STAT(metric)			\
+#define DEFINE_ULE_STAT(metric)			\
 static inline void				\
 stat_inc_##metric(task_ptr taskc)		\
 {						\
@@ -17,9 +17,9 @@ stat_inc_##metric(task_ptr taskc)		\
 }						\
 __u64 stat_##metric;				\
 
-DEFINE_SDT_STAT(enqueue);
-DEFINE_SDT_STAT(select_idle_cpu);
-DEFINE_SDT_STAT(select_busy_cpu);
+DEFINE_ULE_STAT(enqueue);
+DEFINE_ULE_STAT(select_idle_cpu);
+DEFINE_ULE_STAT(select_busy_cpu);
 
 volatile int nr_cpu_ids;
 struct cpu_ctx cpu_ctx[MAX_CPUS];
@@ -37,7 +37,7 @@ static struct cpu_ctx *lookup_cpu_ctx(s32 cpu)
 	return &cpu_ctx[cpu];
 }
 
-s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+s32 BPF_STRUCT_OPS(ule_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	task_ptr taskc;
 	bool is_idle = false;
@@ -60,7 +60,7 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 	return cpu;
 }
 
-void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(ule_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	task_ptr taskc ;
 
@@ -75,12 +75,12 @@ void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_dsq_insert(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 }
 
-void BPF_STRUCT_OPS(sdt_dispatch, s32 cpu, struct task_struct *prev)
+void BPF_STRUCT_OPS(ule_dispatch, s32 cpu, struct task_struct *prev)
 {
 	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(ule_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
 	task_ptr taskc;
@@ -94,7 +94,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
+void BPF_STRUCT_OPS(ule_exit_task, struct task_struct *p,
 			      struct scx_exit_task_args *args)
 {
 	scx_task_free(p);
@@ -130,7 +130,7 @@ static s32 cpu_init(s32 cpu)
 	return 0;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(ule_init)
 {
 	int ret, i;
 
@@ -149,17 +149,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 	return 0;
 }
 
-void BPF_STRUCT_OPS(sdt_exit, struct scx_exit_info *ei)
+void BPF_STRUCT_OPS(ule_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
 }
 
-SCX_OPS_DEFINE(sdt_ops,
-	       .select_cpu		= (void *)sdt_select_cpu,
-	       .enqueue			= (void *)sdt_enqueue,
-	       .dispatch		= (void *)sdt_dispatch,
-	       .init_task		= (void *)sdt_init_task,
-	       .exit_task		= (void *)sdt_exit_task,
-	       .init			= (void *)sdt_init,
-	       .exit			= (void *)sdt_exit,
-	       .name			= "sdt");
+SCX_OPS_DEFINE(ule_ops,
+	       .select_cpu		= (void *)ule_select_cpu,
+	       .enqueue			= (void *)ule_enqueue,
+	       .dispatch		= (void *)ule_dispatch,
+	       .init_task		= (void *)ule_init_task,
+	       .exit_task		= (void *)ule_exit_task,
+	       .init			= (void *)ule_init,
+	       .exit			= (void *)ule_exit,
+	       .name			= "ule");
