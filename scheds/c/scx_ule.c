@@ -66,16 +66,6 @@ restart:
 	link = SCX_OPS_ATTACH(skel, sdt_ops, scx_ule);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
-		printf("====SCHEDULING STATS====\n");
-		printf("enqueues=%llu\t", skel->bss->stat_enqueue);
-		printf("inits=%llu\t", skel->bss->stat_init);
-		printf("exits=%llu\t", skel->bss->stat_exit);
-		printf("\n");
-
-		printf("select_idle_cpu=%llu\t", skel->bss->stat_select_idle_cpu);
-		printf("select_busy_cpu=%llu\t", skel->bss->stat_select_busy_cpu);
-		printf("\n");
-
 		printf("====ALLOCATION STATS====\n");
 		printf("chunk allocs=%llu\t", skel->bss->alloc_stats.chunk_allocs);
 		printf("data_allocs=%llu\n", skel->bss->alloc_stats.data_allocs);
