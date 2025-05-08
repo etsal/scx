@@ -31,7 +31,7 @@ scx_ule: scx_ule.c scx_ule.bpf.skel.h
 scx_ule.bpf.skel.h: scx_ule.bpf.o
 	$(shell $(BPFTOOL) gen skeleton $^ name scx_ule > $@)
 
-scx_ule.bpf.o: sched.bpf.o cpumask.bpf.o sdt_alloc.bpf.o sdt_task.bpf.o
+scx_ule.bpf.o: sched.bpf.o ule_runq.bpf.o cpumask.bpf.o sdt_alloc.bpf.o sdt_task.bpf.o
 	$(BPFTOOL) gen object $@ $^
 
 %.bpf.o: %.bpf.c

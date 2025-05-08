@@ -112,18 +112,11 @@ static s32 cpu_init(s32 cpu)
 	if (!cpu_ctx->online)
 		return 0;
 
-	cpu_ctx->dsq_interactive = 2 * cpu;
-	cpu_ctx->dsq_timeshare = 2 * cpu + 1;
+	cpu_ctx->dsq_realtime = cpu;
 
-	ret = scx_bpf_create_dsq(cpu_ctx->dsq_interactive, NUMA_NODE_ANY);
+	ret = scx_bpf_create_dsq(cpu_ctx->dsq_realtime, NUMA_NODE_ANY);
 	if (ret) {
-		scx_bpf_error("cpu %d: error %d on dsq_interactive creation", cpu, ret);
-		return ret;
-	}
-
-	ret = scx_bpf_create_dsq(cpu_ctx->dsq_interactive, NUMA_NODE_ANY);
-	if (ret) {
-		scx_bpf_error("cpu %d: error %d on dsq_interactive creation", cpu, ret);
+		scx_bpf_error("cpu %d: error %d on dsq_realtime creation", cpu, ret);
 		return ret;
 	}
 

@@ -65,7 +65,7 @@ struct sdt_pool chunk_pool;
 /* Protected by alloc_lock. */
 struct scx_alloc_stats alloc_stats;
 
-static int scx_ffs(__u64 word)
+int scx_ffs(u64 word)
 {
 	unsigned int num = 0;
 
