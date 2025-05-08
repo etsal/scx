@@ -53,13 +53,13 @@ static void set_online_cpus(struct scx_ule *skel)
 
 	ncpus = sysconf(_SC_NPROCESSORS_CONF);
 	skel->bss->nr_cpu_ids = ncpus;
-	
+
 	for (i = 0; i < ncpus; i++) {
 		snprintf(buf, PATH_MAX, fmt, i);
 		/* If > 0 the file does not exist. */
 		if (access(buf, F_OK))
 			continue;
-		
+
 		skel->bss->cpu_ctx[i].online = true;
 	}
 }

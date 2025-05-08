@@ -1,7 +1,7 @@
 c_scheds = ['scx_simple', 'scx_qmap', 'scx_central', 'scx_userland', 'scx_nest',
             'scx_flatcg', 'scx_pair', 'scx_prev']
 
-c_scheds_lib = ['scx_sdt', 'scx_ule']
+c_scheds_lib = ['scx_sdt']
 
 thread_dep = dependency('threads')
 
