@@ -5,11 +5,23 @@
 #include <lib/topology.h>
 
 __weak
-topo_ptr topo_init_node(topo_ptr parent, const cpumask_t *cpumask __arg_trusted)
+int topo_contains(topo_ptr topo, u32 cpu)
+{
+	return scx_bitmap_test_cpu(cpu, topo->mask);
+}
+
+__weak
+int topo_subset(topo_ptr topo, scx_bitmap_t __arg_arena mask)
+{
+	return scx_bitmap_subset(cpu, mask);
+}
+
+__weak
+topo_ptr topo_node(topo_ptr parent, const cpumask_t *cpumask __arg_trusted)
 {
 	topo_ptr topo;
 
-	topo = scx_static_alloc(sizeof(*topo_ptr), 1);
+	topo = scx_static_alloc(sizeof(struct topology), 1);
 	if (!topo) {
 		scx_bpf_error("static allocation failed");
 		return NULL;
@@ -17,7 +29,7 @@ topo_ptr topo_init_node(topo_ptr parent, const cpumask_t *cpumask __arg_trusted)
 
 	topo->parent = parent;
 	topo->nr_children = 0;
-	topo->level = parent ? topo->parent + 1 : 0;
+	topo->level = parent ? topo->parent->level + 1 : 0;
 	scx_bitmap_from_bpf(&topo->mask, cpumask);
 
 	if (topo->level >= TOPO_MAX_LEVEL) {
@@ -30,12 +42,12 @@ topo_ptr topo_init_node(topo_ptr parent, const cpumask_t *cpumask __arg_trusted)
 
 
 __weak
-int topo_add_child(topo_ptr topo, const cpumask_t *cpumask __arg_trusted)
+int topo_add(topo_ptr parent, const cpumask_t *cpumask __arg_trusted mask)
 {
 	topo_ptr child;
 	int ret;
 
-	child = topo_init_node(parent, mask);
+	child = topo_node(parent, mask);
 	if (!child)
 		return -ENOMEM;
 
@@ -51,13 +63,14 @@ int topo_add_child(topo_ptr topo, const cpumask_t *cpumask __arg_trusted)
 
 SEC("syscall")
 __weak
-int topo_init_topology(const cpumask *mask __arg_trusted)
+int topo_init(const cpumask_t *mask __arg_trusted)
 {
 	struct topo_iter iter;
 	topo_ptr topo, child;
+	int i;
 
 	if (!topo_all) {
-		topo_all = topo_init_node(NULL, mask);
+		topo_all = topo_node(NULL, mask);
 		if (!topo_all) {
 			scx_bpf_error("couldn't initialize topology");
 			return -EINVAL;
@@ -66,7 +79,7 @@ int topo_init_topology(const cpumask *mask __arg_trusted)
 		return 0;
 	}
 
-	for (i = 0; i < TOPO_MAX_LEVEL; i++) {
+	for (i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
 		if (!topo_subset(topo, topo_mask)) {
 			scx_bpf_error("mask not a subset of a topology node");
 			return -EINVAL;
@@ -88,7 +101,7 @@ int topo_init_topology(const cpumask *mask __arg_trusted)
 		 */
 		if (!child) {
 			topo_add(topo, mask);
-			return;
+			return 0;
 		}
 	}
 
@@ -97,26 +110,20 @@ int topo_init_topology(const cpumask *mask __arg_trusted)
 }
 
 __weak
-int topo_contains(topo_ptr topo, u32 cpu)
-{
-	return scx_bitmap_test_cpu(cpu, topo->mask);
-}
-
-__weak
-int topo_subset(topo_ptr topo, scx_bitmap_t __arg_arena *mask)
-{
-	return scx_bitmap_subset(cpu, mask);
-}
-
-__weak
-int topo_find_descendant(topo_ptr topo, u32 cpu)
+topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 {
 	struct topo_iter iter;
 	topo_ptr child;
 	int lvl;
 
+	if (!topo_contains(topo, cpu)) {
+		scx_bpf_error("missing cpu from topology");
+		return NULL;
+	}
+
 	for (lvl = 0; lvl < TOPO_MAX_LEVEL && can_loop; lvl++)
-		child = NULL;
+		if (!topo->nr_children)
+			return topo;
 
 		TOPO_FOR_EACH_CHILD(iter, topo, child) {
 			if (topo_contains(child, cpu))
@@ -124,8 +131,8 @@ int topo_find_descendant(topo_ptr topo, u32 cpu)
 		}
 
 		if (!child) {
-			scx_bpf_error("missing cpu from topology");
-			return -EINVAL;
+			scx_bpf_error("missing cpu from inner topology nodes");
+			return NULL;
 		}
 
 		topo = child;
@@ -151,6 +158,8 @@ __weak
 topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 {
 	topo_ptr parent = topo->parent;
+	struct topo_iter iter;
+	topo_ptr child;
 
 	if (!parent) {
 		scx_bpf_error("parent has no sibling");
