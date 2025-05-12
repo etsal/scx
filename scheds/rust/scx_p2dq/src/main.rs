@@ -24,6 +24,7 @@ use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -36,6 +37,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
 
 use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
@@ -112,6 +114,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
         scx_p2dq::init_skel!(&mut skel);
 
+        self.setup_arenas(&mut skel)?;
+
         let struct_ops = Some(scx_ops_attach!(skel, p2dq)?);
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -169,6 +173,53 @@ impl<'a> Scheduler<'a> {
 
         self.struct_ops.take();
         uei_report!(&self.skel, uei)
+    }
+
+    fn setup_arenas(&mut skel: u64) -> Result<()> {
+
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.p2dq_arena_setup.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+
+            return Err("p2dq_setup error");
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology(&mut skel: u64) -> Result<()> {
+
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+
+        // XXX Get the exact amount of nodes the topology will have.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.p2dq_arena_setup.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+
+            return Err("p2dq_setup error");
+        }
+
+        Ok(())
     }
 }
 

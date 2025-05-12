@@ -79,7 +79,6 @@ int topo_init(scx_bitmap_t mask)
 	}
 
 	for (topo = topo_all, i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
-		/* XXX Using topo_subset directly crashes Clang. */
 		if (topo_subset(topo, mask)) {
 			scx_bpf_error("mask not a subset of a topology node");
 			return -EINVAL;

@@ -12,10 +12,14 @@
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/bpf_arena_common.h"
 #include "../../../../include/lib/sdt_task.h"
+#include "../../../../include/lib/cpumask.h"
+#include "../../../../include/lib/topology.h"
 #else
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.h>
 #include <lib/sdt_task.h>
+#include <lib/cpumask.h>
+#include <lib/topology.h>
 #endif
 
 #include "intf.h"
@@ -38,7 +42,6 @@ UEI_DEFINE(uei);
 
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
-
 
 /*
  * Domains and cpus
@@ -89,7 +92,6 @@ u32 sched_mode = MODE_PERFORMANCE;
 
 private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
-
 
 static u64 max(u64 a, u64 b)
 {
@@ -1495,6 +1497,64 @@ s32 static start_timers(void)
 	return 0;
 }
 
+SEC("syscall")
+int p2dq_topo_bitmap(void)
+{
+	topo_bitmap = scx_bitmap_alloc();
+	if (!topo_bitmap)
+		return -ENOMEM;
+
+	return 0;
+}
+
+SEC("syscall")
+int p2dq_arena_init(void)
+{
+	int ret, i;
+
+	ret = scx_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
+	if (ret)
+		return ret;
+
+	/* How many types to store all CPU IDs? */
+	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
+	if (ret)
+		return ret;
+
+	ret = scx_percpu_storage_init();
+	if (ret)
+		return ret;
+
+	ret = scx_task_init(sizeof(struct task_ctx));
+	if (ret)
+		return ret;
+
+	bpf_for(i, 0, MAX_TOPO_NODES) {
+		topo_bitmaps[i] = 
+
+	}
+
+	return 0;
+}
+
+SEC("syscall")
+int p2dq_topology_init(void)
+{
+	int ret, i;
+
+	bpf_for(i, 0, MAX_TOPO_NODES) {
+		if (!topo_bitmaps[i])
+			continue;
+
+		ret = topo_init(topo_bitmaps[i]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+
 static __always_inline s32 p2dq_init_impl()
 {
 	int i, ret;
@@ -1591,10 +1651,6 @@ static __always_inline s32 p2dq_init_impl()
 
 	if (start_timers() < 0)
 		return -EINVAL;
-
-	ret = scx_task_init(sizeof(task_ctx));
-	if (ret)
-		return ret;
 
 	return 0;
 }

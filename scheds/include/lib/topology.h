@@ -36,3 +36,5 @@ struct topo_iter {
 #define TOPO_FOR_EACH_CHILD(_iter, _topo, _child)		\
 	TOPO_ITER_INIT(_iter, _topo);				\
 	for ((_child) = NULL; (_child = TOPO_ITER_NEXT(_iter)) && can_loop;)
+
+int topo_init(scx_bitmap_t mask);
