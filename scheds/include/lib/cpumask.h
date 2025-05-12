@@ -41,5 +41,7 @@ int scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bp
 int scx_bitmap_and_cpumask(scx_bitmap_t dst __arg_arena, scx_bitmap_t scx __arg_arena,
 			       const struct cpumask *bpf __arg_trusted);
 
+bool scx_bitmap_intersects(scx_bitmap_t __arg_arena arg1, scx_bitmap_t __arg_arena arg2);
 bool scx_bitmap_intersects_cpumask(scx_bitmap_t __arg_arena scx, const struct cpumask *bpf __arg_trusted);
+bool scx_bitmap_subset(scx_bitmap_t __arg_arena big, scx_bitmap_t __arg_arena small);
 bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted);

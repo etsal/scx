@@ -4,6 +4,8 @@
 #include <lib/cpumask.h>
 #include <lib/percpu.h>
 
+const volatile u32 nr_cpu_ids = 64;
+
 static struct scx_allocator scx_bitmap_allocator;
 size_t mask_size;
 
@@ -182,15 +184,12 @@ scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bpfmas
 }
 
 __weak
-bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted)
+bool scx_bitmap_subset(scx_bitmap_t __arg_arena big, scx_bitmap_t __arg_arena small)
 {
-	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
 	int i;
 
-	scx_bitmap_from_bpf(tmp, small);
-
 	bpf_for(i, 0, mask_size) {
-		if (~big->bits[i] & tmp->bits[i])
+		if (~big->bits[i] & small->bits[i])
 			return false;
 	}
 
@@ -198,19 +197,36 @@ bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumas
 }
 
 __weak
-bool scx_bitmap_intersects_cpumask(scx_bitmap_t __arg_arena scx, const struct cpumask *bpf __arg_trusted)
+bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted)
 {
 	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
+
+	scx_bitmap_from_bpf(tmp, small);
+
+	return scx_bitmap_subset(big, tmp);
+}
+
+__weak
+bool scx_bitmap_intersects(scx_bitmap_t __arg_arena arg1, scx_bitmap_t __arg_arena arg2)
+{
 	int i;
 
-	scx_bitmap_from_bpf(tmp, bpf);
-
 	bpf_for(i, 0, mask_size) {
-		if (scx->bits[i] & tmp->bits[i])
+		if (arg1->bits[i] & arg2->bits[i])
 			return true;
 	}
 
 	return false;
+}
+
+__weak
+bool scx_bitmap_intersects_cpumask(scx_bitmap_t __arg_arena scx, const struct cpumask *bpf __arg_trusted)
+{
+	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
+
+	scx_bitmap_from_bpf(tmp, bpf);
+
+	return scx_bitmap_intersects(scx, tmp);
 }
 
 __weak
