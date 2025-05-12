@@ -182,19 +182,26 @@ scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bpfmas
 }
 
 __weak
-bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted)
+bool scx_bitmap_subset(scx_bitmap_t __arg_arena big, scx_bitmap_t __arg_arena small)
 {
-	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
 	int i;
 
-	scx_bitmap_from_bpf(tmp, small);
-
 	bpf_for(i, 0, mask_size) {
-		if (~big->bits[i] & tmp->bits[i])
+		if (~big->bits[i] & small->bits[i])
 			return false;
 	}
 
 	return true;
+}
+
+__weak
+bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted)
+{
+	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
+
+	scx_bitmap_from_bpf(tmp, small);
+
+	return scx_bitmap_subset(big, tmp);
 }
 
 __weak
