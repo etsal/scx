@@ -1529,27 +1529,40 @@ int p2dq_arena_init(void)
 	if (ret)
 		return ret;
 
-	bpf_for(i, 0, MAX_TOPO_NODES) {
-		topo_bitmaps[i] = 
-
-	}
-
 	return 0;
 }
 
 SEC("syscall")
-int p2dq_topology_init(void)
+int p2dq_alloc_mask(void *ctx)
 {
-	int ret, i;
+	scx_bitmap_t ptr;
 
-	bpf_for(i, 0, MAX_TOPO_NODES) {
-		if (!topo_bitmaps[i])
-			continue;
+	ptr = scx_bitmap_alloc();
+	if (!ptr)
+		return -ENOMEM;
 
-		ret = topo_init(topo_bitmaps[i]);
-		if (ret)
-			return ret;
-	}
+	*(u64 *)ctx = (u64)&ptr->mask;
+
+	return 0;
+}
+
+/* 
+ * XXX Change from syscall to anothe program type
+ * so we can nicely pass arguments.
+ */
+SEC("syscall")
+int p2dq_topology_node_init(void *ctx)
+{
+	scx_bitmap_t mask;
+	int ret;
+
+	ret = bpf_probe_read_kernel(&mask, sizeof(mask), ctx);
+	if (ret)
+		return ret;
+
+	ret = topo_init(mask);
+	if (ret)
+		return ret;
 
 	return 0;
 }

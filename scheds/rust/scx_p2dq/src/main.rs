@@ -34,6 +34,7 @@ use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_la
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
+use scx_utils::Topology;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
@@ -115,6 +116,7 @@ impl<'a> Scheduler<'a> {
         scx_p2dq::init_skel!(&mut skel);
 
         self.setup_arenas(&mut skel)?;
+        self.setup_topology(&mut skel)?;
 
         let struct_ops = Some(scx_ops_attach!(skel, p2dq)?);
 
@@ -175,7 +177,7 @@ impl<'a> Scheduler<'a> {
         uei_report!(&self.skel, uei)
     }
 
-    fn setup_arenas(&mut skel: u64) -> Result<()> {
+    fn setup_arenas() -> Result<()> {
 
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
@@ -185,7 +187,8 @@ impl<'a> Scheduler<'a> {
         let input = ProgramInput {
             ..Default::default()
         };
-        let output = skel.progs.p2dq_arena_setup.test_run(input)?;
+
+        let output = self.skel.progs.p2dq_arena_setup.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, p2dq_setup returned {}",
@@ -198,25 +201,62 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn setup_topology(&mut skel: u64) -> Result<()> {
+    fn setup_topology_node(mask: &[u64]) -> Result<()> {
 
-        // Allocate the arena memory from the BPF side so userspace initializes it before starting
-        // the scheduler. Despite the function call's name this is neither a test nor a test run,
-        // it's the recommended way of executing SEC("syscall") probes.
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+        self.skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
 
-        // XXX Get the exact amount of nodes the topology will have.
+        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let ptr: u64 = 0;
         let input = ProgramInput {
+            context_in: Some(unsafe {std::mem::transmute::<&mut u64, &mut [u8]>(&mut ptr)}),
             ..Default::default()
         };
-        let output = skel.progs.p2dq_arena_setup.test_run(input)?;
+
+        let output = skel.progs.p2dq_alloc_mask.test_run(input)?;
         if output.return_value != 0 {
             bail!(
-                "Could not initialize arenas, p2dq_setup returned {}",
+                "Could not initialize arenas, setup_topology_node returned {}",
                 output.return_value as i32
             );
 
-            return Err("p2dq_setup error");
+            return Err("setup_topology_node error");
+        }
+
+        // Treat the arena pointer as a pointer to a mask.
+        // XXX Extremely hacky, there is probably a better way.
+        // The proper way is to just use a bounce pointer as a 
+        // hack and call it a day for now.
+        let bpfmask = std::mem::transmute::<u64, &mut [u8;512]>(ptr + 8);
+        bpfmask.copy_from_slice(mask);
+
+            context_in: Some(unsafe {std::mem::transmute::<&mut u64, &mut [u8]>(&mut ptr)}),
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+
+        Ok(())
+    }
+
+    fn setup_topology(&mut skel: u64) -> Result<()> {
+        let topo = Topology::new().expect("Failed to build host topology");
+
+        self.setup_topology_node(&mut skel, topo.span.as_raw_slice())?;
+
+        for (_, node) in topo.nodes {
+            self.setup_topology_node(&mut skel, node.span.as_raw_slice())?;
+        }
+
+        for llc in self.all_llcs {
+            self.setup_topology_node(&mut skel, llc.span.as_raw_slice())?;
+        }
+
+        for llc in self.all_cores{
+            self.setup_topology_node(&mut skel, llc.span.as_raw_slice())?;
+        }
+
+        for llc in self.all_cpus{
+            self.setup_topology_node(&mut skel, llc.span.as_raw_slice())?;
         }
 
         Ok(())
