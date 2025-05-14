@@ -35,6 +35,8 @@ enum consts {
 
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,
+
+	STATIC_ALLOC_PAGES_GRANULARITY = 1,
 };
 
 enum p2dq_timers_defs {

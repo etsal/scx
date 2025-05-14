@@ -18,7 +18,7 @@ struct topology {
 	void *data;
 };
 
-topo_ptr topo_all;
+topo_ptr topo_all __weak;
 
 struct topo_iter {
 	topo_ptr topo;

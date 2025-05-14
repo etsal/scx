@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -31,9 +32,11 @@ use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
+use scx_utils::{Core, Llc};
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
@@ -105,6 +108,7 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
+        open_skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
@@ -113,20 +117,14 @@ impl<'a> Scheduler<'a> {
         };
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
+
         scx_p2dq::init_skel!(&mut skel);
-
-        self.setup_arenas(&mut skel)?;
-        self.setup_topology(&mut skel)?;
-
-        let struct_ops = Some(scx_ops_attach!(skel, p2dq)?);
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
-        info!("P2DQ scheduler started! Run `scx_p2dq --monitor` for metrics.");
-
         Ok(Self {
             skel,
-            struct_ops,
+            struct_ops: None,
             stats_server,
         })
     }
@@ -177,89 +175,94 @@ impl<'a> Scheduler<'a> {
         uei_report!(&self.skel, uei)
     }
 
-    fn setup_arenas() -> Result<()> {
+    fn setup_arenas(&mut self) -> Result<()> {
 
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
-
         let input = ProgramInput {
             ..Default::default()
         };
 
-        let output = self.skel.progs.p2dq_arena_setup.test_run(input)?;
+        let output = self.skel.progs.p2dq_arena_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, p2dq_setup returned {}",
                 output.return_value as i32
             );
-
-            return Err("p2dq_setup error");
         }
 
         Ok(())
     }
 
-    fn setup_topology_node(mask: &[u64]) -> Result<()> {
-
-        self.skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+    fn setup_topology_node(&mut self, mask: &[u64]) -> Result<()> {
 
         // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
-        let ptr: u64 = 0;
         let input = ProgramInput {
-            context_in: Some(unsafe {std::mem::transmute::<&mut u64, &mut [u8]>(&mut ptr)}),
             ..Default::default()
         };
 
-        let output = skel.progs.p2dq_alloc_mask.test_run(input)?;
+        let output = self.skel.progs.p2dq_alloc_mask.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, setup_topology_node returned {}",
                 output.return_value as i32
             );
-
-            return Err("setup_topology_node error");
         }
 
-        // Treat the arena pointer as a pointer to a mask.
-        // XXX Extremely hacky, there is probably a better way.
-        // The proper way is to just use a bounce pointer as a 
-        // hack and call it a day for now.
-        let bpfmask = std::mem::transmute::<u64, &mut [u8;512]>(ptr + 8);
-        bpfmask.copy_from_slice(mask);
+        let ptr = unsafe {std::mem::transmute::<u64, &mut [u64;16]> (self.skel.maps.bss_data.setup_ptr)  };
 
-            context_in: Some(unsafe {std::mem::transmute::<&mut u64, &mut [u8]>(&mut ptr)}),
+        ptr.clone_from_slice(mask);
+
         let input = ProgramInput {
             ..Default::default()
         };
-
+        let output = self.skel.progs.p2dq_topology_node_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "p2dq_topology_node_init returned {}",
+                output.return_value as i32
+            );
+        }
 
         Ok(())
     }
 
-    fn setup_topology(&mut skel: u64) -> Result<()> {
+    fn setup_topology(&mut self) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
-        self.setup_topology_node(&mut skel, topo.span.as_raw_slice())?;
+        self.setup_topology_node(topo.span.as_raw_slice())?;
 
         for (_, node) in topo.nodes {
-            self.setup_topology_node(&mut skel, node.span.as_raw_slice())?;
+            self.setup_topology_node(node.span.as_raw_slice())?;
         }
 
-        for llc in self.all_llcs {
-            self.setup_topology_node(&mut skel, llc.span.as_raw_slice())?;
+        for (_, llc) in topo.all_llcs {
+            self.setup_topology_node(Arc::<Llc>::into_inner(llc).expect("missing llc").span.as_raw_slice())?;
         }
 
-        for llc in self.all_cores{
-            self.setup_topology_node(&mut skel, llc.span.as_raw_slice())?;
+        for (_, core) in topo.all_cores {
+            self.setup_topology_node(Arc::<Core>::into_inner(core).expect("missing core").span.as_raw_slice())?;
         }
-
-        for llc in self.all_cpus{
-            self.setup_topology_node(&mut skel, llc.span.as_raw_slice())?;
+        for (_, cpu) in topo.all_cpus {
+            let mut mask = [0; 16];
+            mask[cpu.id / 64] |= (1 << cpu.id) % 64;
+            self.setup_topology_node(&mask)?;
         }
 
         Ok(())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        self.setup_arenas()?;
+        self.setup_topology()?;
+
+        self.struct_ops = Some(scx_ops_attach!(self.skel, p2dq)?);
+
+        info!("P2DQ scheduler started! Run `scx_p2dq --monitor` for metrics.");
+
+        Ok(())
+
     }
 }
 
@@ -343,6 +346,8 @@ fn main() -> Result<()> {
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts.sched, &mut open_object, opts.verbose)?;
+        sched.start()?;
+
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }

@@ -10,7 +10,7 @@ fn main() {
         .enable_skel("src/bpf/main.bpf.c", "bpf")
         .add_source("../../../lib/sdt_task.bpf.c")
         .add_source("../../../lib/sdt_alloc.bpf.c")
-        .add_source("../../../lib/cpumask.bpf.c")
+        .add_source("../../../lib/bitmap.bpf.c")
         .add_source("../../../lib/topology.bpf.c")
         .compile_link_gen()
         .unwrap();

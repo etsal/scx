@@ -13,12 +13,14 @@
 #include "../../../../include/scx/bpf_arena_common.h"
 #include "../../../../include/lib/sdt_task.h"
 #include "../../../../include/lib/cpumask.h"
+#include "../../../../include/lib/percpu.h"
 #include "../../../../include/lib/topology.h"
 #else
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.h>
 #include <lib/sdt_task.h>
 #include <lib/cpumask.h>
+#include <lib/percpu.h>
 #include <lib/topology.h>
 #endif
 
@@ -78,9 +80,12 @@ const volatile bool has_little_cores = false;
 const volatile u32 debug = 2;
 
 const u32 zero_u32 = 0;
+extern const volatile u32 nr_cpu_ids;
 
 const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
 const u64 lb_backoff_ns = 5LLU * NSEC_PER_MSEC;
+
+u64 setup_ptr;
 
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
@@ -1498,19 +1503,9 @@ s32 static start_timers(void)
 }
 
 SEC("syscall")
-int p2dq_topo_bitmap(void)
-{
-	topo_bitmap = scx_bitmap_alloc();
-	if (!topo_bitmap)
-		return -ENOMEM;
-
-	return 0;
-}
-
-SEC("syscall")
 int p2dq_arena_init(void)
 {
-	int ret, i;
+	int ret;
 
 	ret = scx_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
 	if (ret)
@@ -1525,7 +1520,7 @@ int p2dq_arena_init(void)
 	if (ret)
 		return ret;
 
-	ret = scx_task_init(sizeof(struct task_ctx));
+	ret = scx_task_init(sizeof(task_ctx));
 	if (ret)
 		return ret;
 
@@ -1533,36 +1528,30 @@ int p2dq_arena_init(void)
 }
 
 SEC("syscall")
-int p2dq_alloc_mask(void *ctx)
+int p2dq_alloc_mask(void)
 {
-	scx_bitmap_t ptr;
+	scx_bitmap_t bitmap;
 
-	ptr = scx_bitmap_alloc();
-	if (!ptr)
+	bitmap = scx_bitmap_alloc();
+	if (!bitmap)
 		return -ENOMEM;
 
-	*(u64 *)ctx = (u64)&ptr->mask;
+	setup_ptr = (u64)&bitmap->bits;
 
 	return 0;
 }
 
-/* 
- * XXX Change from syscall to anothe program type
- * so we can nicely pass arguments.
- */
 SEC("syscall")
-int p2dq_topology_node_init(void *ctx)
+int p2dq_topology_node_init(void)
 {
-	scx_bitmap_t mask;
+	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(setup_ptr, struct scx_bitmap, bits);
 	int ret;
 
-	ret = bpf_probe_read_kernel(&mask, sizeof(mask), ctx);
+	ret = topo_init(bitmap);
 	if (ret)
 		return ret;
 
-	ret = topo_init(mask);
-	if (ret)
-		return ret;
+	setup_ptr = 0;
 
 	return 0;
 }

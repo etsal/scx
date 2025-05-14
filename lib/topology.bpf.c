@@ -4,6 +4,8 @@
 #include <lib/cpumask.h>
 #include <lib/topology.h>
 
+topo_ptr topo_all;
+
 __weak
 int topo_contains(topo_ptr topo, u32 cpu)
 {
@@ -60,7 +62,6 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 	return 0;
 }
 
-SEC("syscall")
 __weak
 int topo_init(scx_bitmap_t mask)
 {

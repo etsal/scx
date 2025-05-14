@@ -14,7 +14,7 @@ struct scx_bitmap {
 
 typedef struct scx_bitmap __arena * __arg_arena scx_bitmap_t;
 
-extern const volatile u32 nr_cpu_ids;
+const extern volatile u32 nr_cpu_ids;
 
 /* Mask size in 64-bit words. */
 extern size_t mask_size;
