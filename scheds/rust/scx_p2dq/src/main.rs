@@ -36,7 +36,6 @@ use scx_utils::{Core, Llc};
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
-use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;

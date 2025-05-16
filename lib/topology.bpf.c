@@ -12,13 +12,13 @@ int topo_contains(topo_ptr topo, u32 cpu)
 	return scx_bitmap_test_cpu(cpu, topo->mask);
 }
 
-__weak
+static
 int topo_subset(topo_ptr topo, scx_bitmap_t mask)
 {
 	return scx_bitmap_subset(topo->mask, mask);
 }
 
-__weak
+static
 topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
 {
 	topo_ptr topo;
@@ -43,7 +43,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
 }
 
 
-__weak
+static
 int topo_add(topo_ptr parent, scx_bitmap_t mask)
 {
 	topo_ptr child;
@@ -63,8 +63,9 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 }
 
 __weak
-int topo_init(scx_bitmap_t mask)
+int topo_init_internal(u64 ptr)
 {
+	scx_bitmap_t mask = (scx_bitmap_t)ptr;
 	struct topo_iter iter;
 	topo_ptr topo, child;
 	int i;
