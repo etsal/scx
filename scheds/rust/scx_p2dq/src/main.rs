@@ -196,6 +196,7 @@ impl<'a> Scheduler<'a> {
 
     fn setup_topology_node(&mut self, mask: &[u64]) -> Result<()> {
 
+        println!("{:X}", mask[0]);
         // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
         let input = ProgramInput {
             ..Default::default()
@@ -209,9 +210,10 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        let ptr = unsafe {std::mem::transmute::<u64, &mut [u64;16]> (self.skel.maps.bss_data.setup_ptr)  };
+        let ptr = unsafe {std::mem::transmute::<u64, &mut [u64;512]> (self.skel.maps.bss_data.setup_ptr)  };
 
-        ptr.clone_from_slice(mask);
+        let (valid_mask, _) = ptr.split_at_mut(mask.len());
+        valid_mask.clone_from_slice(mask);
 
         let input = ProgramInput {
             ..Default::default()
@@ -230,21 +232,26 @@ impl<'a> Scheduler<'a> {
     fn setup_topology(&mut self) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
+        println!("TOP");
         self.setup_topology_node(topo.span.as_raw_slice())?;
 
         for (_, node) in topo.nodes {
+            println!("NODE");
             self.setup_topology_node(node.span.as_raw_slice())?;
         }
 
         for (_, llc) in topo.all_llcs {
+            println!("LLC");
             self.setup_topology_node(Arc::<Llc>::into_inner(llc).expect("missing llc").span.as_raw_slice())?;
         }
 
         for (_, core) in topo.all_cores {
+            println!("CORE");
             self.setup_topology_node(Arc::<Core>::into_inner(core).expect("missing core").span.as_raw_slice())?;
         }
         for (_, cpu) in topo.all_cpus {
-            let mut mask = [0; 16];
+            println!("CPU");
+            let mut mask = [0; 9];
             mask[cpu.id / 64] |= (1 << cpu.id) % 64;
             self.setup_topology_node(&mask)?;
         }

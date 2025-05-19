@@ -45,3 +45,4 @@ bool scx_bitmap_intersects(scx_bitmap_t __arg_arena arg1, scx_bitmap_t __arg_are
 bool scx_bitmap_intersects_cpumask(scx_bitmap_t __arg_arena scx, const struct cpumask *bpf __arg_trusted);
 bool scx_bitmap_subset(scx_bitmap_t __arg_arena big, scx_bitmap_t __arg_arena small);
 bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted);
+int scx_bitmap_print(scx_bitmap_t __arg_arena mask);

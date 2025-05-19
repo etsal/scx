@@ -189,3 +189,14 @@ bool scx_bitmap_intersects(scx_bitmap_t __arg_arena arg1, scx_bitmap_t __arg_are
 
 	return false;
 }
+
+__weak
+int scx_bitmap_print(scx_bitmap_t __arg_arena mask)
+{
+	int i;
+
+	for (i = 0; i < mask_size && can_loop; i++)
+		bpf_printk("%x", mask->bits[i]);
+
+	return 0;
+}

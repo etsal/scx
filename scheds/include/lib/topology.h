@@ -37,6 +37,4 @@ struct topo_iter {
 	TOPO_ITER_INIT(_iter, _topo);				\
 	for ((_child) = NULL; (_child = TOPO_ITER_NEXT(_iter)) && can_loop;)
 
-int topo_init_internal(u64 ptr);
-
-#define topo_init(_ptr) (topo_init_internal((u64)(_ptr)))
+int topo_init(scx_bitmap_t __arg_arena mask);
