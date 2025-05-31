@@ -214,20 +214,6 @@ u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level)
 	return (u64)topo->mask;
 }
 
-struct topo_iter {
-	/* The current topology node. */
-	topo_ptr topo;
-	/*
-	 * The index for every node in the path of the tree for , -1 denotes levels > the current one. 
-	 * E.g., [0, 1, 2, 1, 2] means:
-	 * - index on level 0 (we only have one top-level node]
-	 * - index 1 on level 1 (the top-level node's second child)
-	 * - index 2 on level 2 (the NUMA node topology node's third child)
-	 * and so on.
-	 */
-	int indices[TOPO_MAX_LEVEL];
-};
-
 static int
 topo_iter_init(topo_ptr topo, struct topo_iter *iter)
 {
@@ -333,6 +319,20 @@ topo_iter_next(struct topo_iter *iter)
 	return false;
 }
 
+__weak u64
+topo_iter_level_internal(struct topo_iter *iter, enum topo_level lvl)
+{
+	if (!iter)
+		return (u64)NULL;
+
+	do  {
+		if (!topo_iter_next(iter))
+			return (u64)NULL;
+	} while (iter->topo->level != lvl && can_loop);
+
+	return (u64)iter->topo;
+}
+
 __weak __maybe_unused
 int topo_print(void)
 {
@@ -370,6 +370,40 @@ int topo_print(void)
 
 		scx_bitmap_print(iter.topo->mask);
 	} while (topo_iter_next(&iter) && can_loop);
+
+	return 0;
+}
+
+
+__weak __maybe_unused
+int topo_print_by_level(void)
+{
+	struct topo_iter iter;
+	topo_ptr topo;
+
+	bpf_printk("TOP-LEVEL MASK");
+	scx_bitmap_print(topo_all->mask);
+	bpf_printk("\n");
+
+	bpf_printk("NODE MASKS");
+	TOPO_FOR_EACH_NODE(&iter, topo)
+		scx_bitmap_print(topo->mask);
+	bpf_printk("\n");
+
+	bpf_printk("LLC MASKS");
+	TOPO_FOR_EACH_LLC(&iter, topo)
+		scx_bitmap_print(topo->mask);
+	bpf_printk("\n");
+
+	bpf_printk("CORE MASKS");
+	TOPO_FOR_EACH_CORE(&iter, topo)
+		scx_bitmap_print(topo->mask);
+	bpf_printk("\n");
+
+	bpf_printk("CPU MASKS");
+	TOPO_FOR_EACH_CPU(&iter, topo)
+		scx_bitmap_print(topo->mask);
+	bpf_printk("\n");
 
 	return 0;
 }
