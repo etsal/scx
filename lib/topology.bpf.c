@@ -72,7 +72,7 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 }
 
 __weak
-int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size)
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 {
 	/* Initializing the child to appease the verifier. */
 	topo_ptr topo, child = NULL;

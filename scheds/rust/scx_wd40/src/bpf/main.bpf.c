@@ -86,20 +86,55 @@ const volatile u32 greedy_threshold_x_numa;
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
+static s32 scx_bitmap_pick_idle_once(scx_bitmap_t idle __arg_arena, scx_bitmap_t mask __arg_arena, int flags)
+{
+	int i;
+
+	/* XXX Add per-cpu state for this. */
+	bpf_for(i, 0, mask_size) {
+		state = idle_cpumask->bits[i] & mask->bits[i];
+		if (!state)
+			break;
+
+		off = scx_ffs(state);
+		if (__test_and_set(state, state & ~(1ULL << off)))
+		    return -EAGAIN;
+
+		return i * 64 + off;
+	}
+
+	return -ENOSPC;
+}
+
 static s32 scx_bitmap_pick_idle_cpu(scx_bitmap_t mask __arg_arena, int flags)
 {
-	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
-	s32 cpu;
+	/*
+	 * XXX For every position, and then compare with 0. If 0 continue,
+	 * otherwise ffs it and try to unset the bit. Try to clear the CPU,
+	 * if we fail we try again.
+	 */
+	u64 off;
 
-	if (!bpf)
-		return -1;
+	/* XXX Search in the local node. */
+	while (can_loop) {
+		cpu = scx_bitmap_pick_idle_once(/* XXX local cpu mask */, mask, flags);
+		if (cpu == -EAGAIN)
+			continue;
 
-	scx_bitmap_to_bpf(bpf, mask);
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpf), flags);
+		return cpu;
+	}
 
-	scx_bitmap_from_bpf(mask, cast_mask(bpf));
+	while (can_loop) {
+		cpu = scx_bitmap_pick_idle_once(mask, flags);
+		if (cpu == -EAGAIN)
+			continue;
 
-	return cpu;
+		return cpu;
+	}
+
+	scx_bpf_error("timed out");
+
+	return -ETIMEDOUT;
 }
 
 static s32 scx_bitmap_any_distribute(scx_bitmap_t mask __arg_arena)
@@ -152,6 +187,7 @@ static void task_load_adj(task_ptr taskc, u64 now, bool runnable)
 	taskc->dcyc_rd = rdp;
 }
 
+scx_bitmap_t idle_cpumask;
 scx_bitmap_t all_cpumask;
 scx_bitmap_t direct_greedy_cpumask;
 scx_bitmap_t kick_greedy_cpumask;
@@ -847,6 +883,18 @@ static s32 initialize_cpu(s32 cpu)
 	return -ENOENT;
 }
 
+void wd40_update_idle(s32 cpu, bool idle)
+{
+	u64 ind = cpu / 64;
+	u64 bit = 1ULL << (cpu % 64);
+
+	if (idle)
+		__atomic_or_fetch(&idle_mask->bits[ind], bit);
+	else
+		__atomic_or_fetch(&idle_mask->bits[ind], ~bit);
+}
+
+
 SEC("syscall")
 int wd40_setup(void)
 {
@@ -863,6 +911,15 @@ int wd40_setup(void)
 	ret = create_save_scx_bitmap(&kick_greedy_cpumask);
 	if (ret)
 		return ret;
+
+	ret = create_save_scx_bitmap(&idle_cpumask);
+	if (ret)
+		return ret;
+
+	/*
+	 * XXX How do we initialize the bitmap? Is there a possible
+	 * race condition?
+	 */
 
 	ret = lb_domain_init();
 	if (ret)
@@ -933,6 +990,7 @@ SCX_OPS_DEFINE(wd40,
 	       .running			= (void *)wd40_running,
 	       .stopping		= (void *)wd40_stopping,
 	       .quiescent		= (void *)wd40_quiescent,
+	       .update_idle		= (void *)wd40_update_idle,
 	       .set_weight		= (void *)wd40_set_weight,
 	       .set_cpumask		= (void *)wd40_set_cpumask,
 	       .init_task		= (void *)wd40_init_task,
