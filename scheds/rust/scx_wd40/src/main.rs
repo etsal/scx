@@ -391,7 +391,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn setup_topology_node(skel: &mut BpfSkel<'a>, mask: &[u64]) -> Result<()> {
+    fn setup_topology_node(skel: &mut BpfSkel<'a>, mask: &[u64], data_size: usize) -> Result<()> {
 
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
@@ -427,7 +427,8 @@ impl<'a> Scheduler<'a> {
         valid_mask.clone_from_slice(mask);
 
         let mut args = types::arena_topology_node_init_args {
-            bitmap: args.bitmap as c_ulong
+            bitmap: args.bitmap as c_ulong,
+            data_size: data_size as c_ulong,
         };
 
         let input = ProgramInput {
@@ -453,10 +454,10 @@ impl<'a> Scheduler<'a> {
     fn setup_topology(skel: &mut BpfSkel<'a>) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
-        Self::setup_topology_node(skel, topo.span.as_raw_slice())?;
+        Self::setup_topology_node(skel, topo.span.as_raw_slice(), 0)?;
 
         for (_, node) in topo.nodes {
-            Self::setup_topology_node(skel, node.span.as_raw_slice())?;
+            Self::setup_topology_node(skel, node.span.as_raw_slice(), 0)?;
         }
 
         for (_, llc) in topo.all_llcs {
@@ -466,6 +467,7 @@ impl<'a> Scheduler<'a> {
                     .expect("missing llc")
                     .span
                     .as_raw_slice(),
+                0
             )?;
         }
         for (_, core) in topo.all_cores {
@@ -475,12 +477,13 @@ impl<'a> Scheduler<'a> {
                     .expect("missing core")
                     .span
                     .as_raw_slice(),
+                0
             )?;
         }
         for (_, cpu) in topo.all_cpus {
             let mut mask = [0; 9];
             mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
-            Self::setup_topology_node(skel, &mask)?;
+            Self::setup_topology_node(skel, &mask, 0)?;
         }
 
         Ok(())
