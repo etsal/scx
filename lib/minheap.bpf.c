@@ -21,6 +21,9 @@ scx_minheap_t *scx_minheap_alloc(ssize_t capacity)
 	if (!heap)
 		return NULL;
 
+	heap->size = 0;
+	heap->capacity = capacity;
+
 	return heap;
 }
 
@@ -80,3 +83,14 @@ int scx_minheap_pop(scx_minheap_t *heap, struct scx_minheap_elem *helem)
 	return 0;
 }
 
+__weak
+bool scx_minheap_empty(scx_minheap_t *heap)
+{
+	return heap->size == 0;
+}
+
+__weak
+int scx_minheap_invalidate(scx_minheap_t *heap)
+{
+	heap->size = 0;
+}
