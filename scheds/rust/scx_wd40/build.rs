@@ -13,6 +13,7 @@ fn main() {
         .add_source("src/bpf/deadline.bpf.c")
         .add_source("src/bpf/placement.bpf.c")
         .add_source("src/bpf/deadline.bpf.c")
+        .add_source("src/bpf/load_balance.bpf.c")
         .add_source("../../../lib/arena.bpf.c")
         .add_source("../../../lib/bitmap.bpf.c")
         .add_source("../../../lib/cpumask.bpf.c")
