@@ -1,0 +1,426 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
+ */
+
+#include <scx/common.bpf.h>
+
+#include <lib/sdt_task.h>
+#include <lib/btree.h>
+
+/*
+ * XXXETSAL TODO:
+ *	- Add removes
+ *	- Add merges on removes
+ *	- More testing
+ *	- Iterations
+ */
+
+/*
+ * Temporary replacements for memcpy/arrzero, which the BPF
+ * LLVM backend does not support.
+ */
+
+__weak int arrzero(u64 __arg_arena __arena *arr, size_t nelems)
+{
+	int i;
+
+	for (i = 0; i < nelems && can_loop; i++)
+		arr[i] = 0ULL;
+
+	return 0;
+}
+
+__weak int arrcpy(u64 __arg_arena __arena *dst, u64 __arg_arena __arena *src, size_t nelems)
+{
+	int i;
+
+	for (i = 0; i < nelems && can_loop; i++)
+		dst[i] = src[i];
+
+	return 0;
+}
+
+static bt_node *btnode_alloc(bt_node __arg_arena *parent, u64 flags)
+{
+	bt_node *btn;
+
+	btn = scx_static_alloc(sizeof(*btn), 1);
+	if (!btn)
+		return NULL;
+
+	arrzero(&btn->keys[0], BT_LEAFSZ);
+
+	btn->flags = flags;
+	btn->parent = parent;
+
+	return btn;
+}
+
+static bool btnode_isroot(bt_node *btn)
+{
+	return btn->flags & BT_F_ROOT;
+}
+
+static bool btnode_isleaf(bt_node *btn)
+{
+	return btn->flags & BT_F_LEAF;
+}
+
+__weak
+u64 bt_create_internal(void)
+{
+	btree_t __arg_arena *btree;
+
+	btree = scx_static_alloc(sizeof(*btree), 1);
+	if (!btree)
+		return (u64)NULL;
+
+	btree->root = btnode_alloc(NULL, BT_F_ROOT | BT_F_LEAF);
+	if (!btree->root) {
+		/* XXX Fix once we use the buddy allocator. */
+		//scx_buddy_free(buddy, btree);
+		return (u64)NULL;
+	}
+
+	return (u64)btree;
+}
+
+static
+u64 btn_node_index(bt_node *btn, u64 key)
+{
+	int i;
+
+	for (i = 0; i < btn->numkeys && can_loop; i++) {
+		/* 
+		 * It's strict inequality because we
+		 * want nodes equal to the key to be to
+		 * the _right_ of the key. 
+		 */
+		if (key < btn->keys[i])
+			return i;
+	}
+
+	return btn->numkeys;
+}
+
+
+static u64 btn_leaf_index(bt_node __arg_arena *btn, u64 key)
+{
+	int i;
+
+	for (i = 0; i < btn->numkeys && can_loop; i++) {
+		if (key <= btn->keys[i])
+			break;
+	}
+
+	return i;
+}
+
+static bt_node *bt_find_leaf(btree_t __arg_arena *btree, u64 key)
+{
+	bt_node *btn = btree->root;
+	u64 ind;
+	int i = 0;
+
+	bpf_printk("root %p", btn);
+
+	while (!btnode_isleaf(btn) && can_loop && i++ < 10) {
+		ind = btn_node_index(btn, key);
+		btn = (bt_node *)btn->values[ind];
+	}
+
+	bpf_printk("Leaf %p", btn);
+
+	return btn;
+}
+
+__weak
+int btnode_add_internal(bt_node __arg_arena *btn, u64 ind, u64 key, bt_node __arg_arena *value)
+{
+	u64 nelems;
+
+	/* We can have up to BT_LEAFSZ - 1 keys and BT_LEAFSZ values.*/
+	if (unlikely(ind >= BT_LEAFSZ - 1)) {
+		bpf_printk("internal node overflow");
+		return -EINVAL;
+	}
+
+	nelems = btn->numkeys - ind;
+
+	/* 
+	 * XXXETSAL Update written weirdly to avoid a verifier error. 
+	 * Seems to have to do with arena array pointer arithmetic,
+	 * under investigation.
+	 */
+
+	arrcpy(&btn->keys[ind + 1], &btn->keys[ind], nelems);
+
+	ind += 1;
+	if (ind == BT_LEAFSZ)
+		return -EINVAL;
+
+	arrcpy(&btn->values[ind + 1], &btn->values[ind], nelems);
+
+	btn->keys[ind] = key;
+	btn->values[ind + 1] = (u64)value;
+	btn->numkeys += 1;
+
+	return 0;
+}
+
+static int btnode_add_leaf(bt_node *btn, u64 ind, u64 key, u64 value)
+{
+	u64 nelems;
+
+	if (unlikely(ind > btn->numkeys)) {
+		bpf_printk("leaf node overflow (%ld,  %ld)", ind, btn->numkeys);
+		return -EINVAL;
+	}
+
+	nelems = btn->numkeys - ind;
+
+	/* Scooch the keys over and add the new one. */
+	arrcpy(&btn->keys[ind + 1], &btn->keys[ind], nelems);
+	arrcpy(&btn->values[ind + 1], &btn->values[ind], nelems);
+
+	btn->keys[ind] = key;
+	btn->values[ind] = value;
+	btn->numkeys += 1;
+
+	return 0;
+}
+
+u64 btnode_split_leaf(bt_node *btn_new, bt_node *btn_old)
+{
+	u64 off, nelems;
+	u64 key;
+
+	off = (BT_LEAFSZ / 2);
+	nelems = BT_LEAFSZ - off;
+
+	key = btn_old->keys[off];
+
+	/* Copy the data over and wipe them from the previous node. */
+	arrcpy(&btn_new->keys[0], &btn_old->keys[off], nelems);
+	arrcpy(&btn_new->values[0], &btn_old->values[off], nelems);
+	btn_new->numkeys = nelems;
+
+	arrzero(&btn_old->keys[off], nelems);
+	arrzero(&btn_old->values[off], nelems);
+	btn_old->numkeys = off;
+
+	return key;
+}
+
+u64 btnode_split_internal(bt_node *btn_new, bt_node *btn_old)
+{
+	u64 keycopies;
+	u64 off;
+	u64 key;
+
+	off = (BT_LEAFSZ / 2);
+	key = btn_old->keys[off];
+	keycopies = BT_LEAFSZ - off - 1;
+
+	/* We have numkeys + 1 values. */
+	arrcpy(&btn_new->keys[0], &btn_old->keys[off + 1], keycopies);
+	arrcpy(&btn_new->values[0], &btn_old->values[off + 1], keycopies + 1);
+	btn_new->numkeys = keycopies;
+
+	/* Wipe away the removed and copied keys. */
+	arrzero(&btn_old->keys[off], keycopies + 1);
+	arrzero(&btn_old->values[off + 1], keycopies + 1);
+	btn_old->numkeys = off;
+
+	return key;
+}
+
+static 
+int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
+{
+	bt_node *btn_new, *btn_root, *btn_parent;
+	u64 key, ind;
+	int ret;
+
+	bt_print(btree);
+	bpf_printk("SPLIT");
+	do {
+		btn_parent = btn_old->parent;
+		btn_new = btnode_alloc(btn_parent, btn_old->flags);
+
+		if (btn_old->flags & BT_F_LEAF)
+			key = btnode_split_leaf(btn_new, btn_old);
+		else
+			key = btnode_split_internal(btn_new, btn_old);
+
+		if (btnode_isroot(btn_old)) {
+			btn_old->flags &= ~BT_F_ROOT;
+			btn_new->flags &= ~BT_F_ROOT;
+
+			btn_root = btnode_alloc(NULL, BT_F_ROOT);
+			btn_root->keys[0] = key;
+			btn_root->values[0] = (u64)btn_old;
+			btn_root->values[1] = (u64)btn_new;
+			btn_root->numkeys = 1;
+
+			btree->root = btn_root;
+
+			bt_print(btree);
+
+			return 0;
+		}
+		
+		ind = btn_node_index(btn_parent, key);
+		
+		ret = btnode_add_internal(btn_parent, ind, key, btn_new);
+		if (ret)
+			return ret;
+		
+		btn_old = btn_old->parent;
+
+	/* Loop around while the node is full. */
+	} while (btn_old->numkeys >= BT_LEAFSZ - 1 && can_loop);
+
+	return 0;
+}
+
+__weak
+int bt_insert(btree_t __arg_arena *btree, u64 key, u64 value, bool update)
+{
+	bt_node *btn;
+	u64 ind;
+	int ret;
+
+
+	btn = bt_find_leaf(btree, key);
+	if (!btn)
+		return -EINVAL;
+
+	/* Update in place. */
+	ind = btn_leaf_index(btn, key);
+	if (ind < btn->numkeys && btn->keys[ind] == key) {
+		if (!update)
+			return -EALREADY;
+
+		btn->keys[ind] = key;
+		btn->values[ind] = value;
+		return 0;
+	}
+
+	/* Integrity check, node splitting should prevent this. */
+	if (unlikely(btn->numkeys >= BT_LEAFSZ)) {
+		bpf_printk("node overflow");
+		return -EINVAL;
+	}
+
+	ret = btnode_add_leaf(btn, ind, key, value);
+	if (ret)
+		return ret;
+
+	if (btn->numkeys < BT_LEAFSZ)
+		return 0;
+
+	return bt_split(btree, btn);
+}
+
+__weak
+int bt_remove(btree_t __arg_arena *btree, u64 key)
+{
+	return -EOPNOTSUPP;
+}
+
+__weak
+int bt_find(btree_t __arg_arena *btree, u64 key, u64 *value)
+{
+	bt_node *btn = bt_find_leaf(btree, key);
+	u64 ind;
+
+	if (unlikely(!value))
+		return -EINVAL;
+
+	ind = btn_leaf_index(btn, key);
+	if (ind == btn->numkeys || btn->keys[ind] != key)
+		return -EINVAL;
+
+	*value = btn->values[ind];
+
+	return 0;
+}
+
+__weak
+int bt_destroy(btree_t __arg_arena *btree)
+{
+	return -EOPNOTSUPP;
+}
+
+__weak
+int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn)
+{
+	bool isleaf = btnode_isleaf(btn);
+
+	bpf_printk("==== [%ld/%ld ] BTREE %s %p ====", depth, ind, 
+			isleaf ? "LEAF" : "NODE", btn);
+
+	bpf_printk("[KEY] %ld %ld %ld %ld %ld", 
+			btn->keys[0], btn->keys[1], btn->keys[2],
+			btn->keys[3], btn->keys[4]);
+	if (isleaf) {
+		bpf_printk("[VAL] %ld %ld %ld %ld %ld", 
+				btn->values[0], btn->values[1], btn->values[2],
+				btn->values[3], btn->values[4]);
+	} else {
+		bpf_printk("[VAL] 0x%lx 0x%ld 0x%ld 0x%ld 0x%ld", 
+				btn->values[0], btn->values[1], btn->values[2],
+				btn->values[3], btn->values[4]);
+	}
+
+	bpf_printk("");
+
+	return 0;
+}
+
+__weak
+int bt_print(btree_t __arg_arena *btree)
+{
+	bt_node *btn = btree->root;
+	u64 stack[BT_MAXLVL_PRINT];
+	bool isleaf;
+	u64 depth;
+	u64 ind;
+
+	depth = ind = 0;
+
+	while (can_loop) {
+		if (depth >= BT_MAXLVL_PRINT) {
+			bpf_printk("Max level reached, aborting btree print.");
+			return 0;
+		}
+
+		/* Hardcode it for now make it nicer once we use streams. */
+		_Static_assert(BT_LEAFSZ == 5, "Unexpected btree fanout");
+		btnode_print(depth, ind, btn);
+		isleaf = btnode_isleaf(btn);
+
+		/* If we can, go to the next unvisited child. */
+		if (!isleaf && ind <= btn->numkeys) {
+			btn = (bt_node *)btn->values[ind++];
+			stack[depth++] = ind;
+			ind = 0;
+
+			continue;
+		}
+
+		/* Otherwise, go as far up as possible. */
+		while ((isleaf || ind > btn->numkeys) && can_loop) {
+			if (depth == 0)
+				return 0;
+
+			ind = stack[depth--];
+			btn = btn->parent;
+		}
+	}
+
+	return 0;
+}
