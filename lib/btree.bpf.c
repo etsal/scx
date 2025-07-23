@@ -36,8 +36,12 @@ __weak int arrcpy(u64 __arg_arena __arena *dst, u64 __arg_arena __arena *src, si
 {
 	int i;
 
-	for (i = 0; i < nelems && can_loop; i++)
-		dst[i] = src[i];
+	for (i = 0; i < nelems && can_loop; i++) {
+		if (src < dst)
+			dst[nelems - 1 - i] = src[nelems - 1 - i];
+		else
+			dst[i] = src[i];
+	}
 
 	return 0;
 }
@@ -63,7 +67,7 @@ static bool btnode_isroot(bt_node *btn)
 	return btn->flags & BT_F_ROOT;
 }
 
-static bool btnode_isleaf(bt_node *btn)
+static inline bool btnode_isleaf(bt_node *btn)
 {
 	return btn->flags & BT_F_LEAF;
 }
@@ -106,7 +110,7 @@ u64 btn_node_index(bt_node *btn, u64 key)
 }
 
 
-static u64 btn_leaf_index(bt_node __arg_arena *btn, u64 key)
+__weak u64 btn_leaf_index(bt_node __arg_arena *btn, u64 key)
 {
 	int i;
 
@@ -124,14 +128,10 @@ static bt_node *bt_find_leaf(btree_t __arg_arena *btree, u64 key)
 	u64 ind;
 	int i = 0;
 
-	bpf_printk("root %p", btn);
-
 	while (!btnode_isleaf(btn) && can_loop && i++ < 10) {
 		ind = btn_node_index(btn, key);
 		btn = (bt_node *)btn->values[ind];
 	}
-
-	bpf_printk("Leaf %p", btn);
 
 	return btn;
 }
@@ -360,8 +360,11 @@ int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn)
 {
 	bool isleaf = btnode_isleaf(btn);
 
-	bpf_printk("==== [%ld/%ld ] BTREE %s %p ====", depth, ind, 
+	bpf_printk("==== [%ld/%ld] BTREE %s %p ====", depth, ind, 
 			isleaf ? "LEAF" : "NODE", btn);
+
+	/* Hardcode it for now make it nicer once we use streams. */
+	_Static_assert(BT_LEAFSZ == 5, "Unexpected btree fanout");
 
 	bpf_printk("[KEY] %ld %ld %ld %ld %ld", 
 			btn->keys[0], btn->keys[1], btn->keys[2],
@@ -371,7 +374,7 @@ int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn)
 				btn->values[0], btn->values[1], btn->values[2],
 				btn->values[3], btn->values[4]);
 	} else {
-		bpf_printk("[VAL] 0x%lx 0x%ld 0x%ld 0x%ld 0x%ld", 
+		bpf_printk("[VAL] 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx", 
 				btn->values[0], btn->values[1], btn->values[2],
 				btn->values[3], btn->values[4]);
 	}
@@ -386,11 +389,11 @@ int bt_print(btree_t __arg_arena *btree)
 {
 	bt_node *btn = btree->root;
 	u64 stack[BT_MAXLVL_PRINT];
-	bool isleaf;
 	u64 depth;
 	u64 ind;
 
-	depth = ind = 0;
+	depth = 1; 
+	ind = 0;
 
 	while (can_loop) {
 		if (depth >= BT_MAXLVL_PRINT) {
@@ -398,13 +401,10 @@ int bt_print(btree_t __arg_arena *btree)
 			return 0;
 		}
 
-		/* Hardcode it for now make it nicer once we use streams. */
-		_Static_assert(BT_LEAFSZ == 5, "Unexpected btree fanout");
 		btnode_print(depth, ind, btn);
-		isleaf = btnode_isleaf(btn);
 
 		/* If we can, go to the next unvisited child. */
-		if (!isleaf && ind <= btn->numkeys) {
+		if (!btnode_isleaf(btn) && ind <= btn->numkeys) {
 			btn = (bt_node *)btn->values[ind++];
 			stack[depth++] = ind;
 			ind = 0;
@@ -413,7 +413,7 @@ int bt_print(btree_t __arg_arena *btree)
 		}
 
 		/* Otherwise, go as far up as possible. */
-		while ((isleaf || ind > btn->numkeys) && can_loop) {
+		while ((btnode_isleaf(btn) || ind > btn->numkeys) && can_loop) {
 			if (depth == 0)
 				return 0;
 

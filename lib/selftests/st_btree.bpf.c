@@ -30,8 +30,8 @@ __weak int scx_selftest_btree_find_nonexistent(btree_t __arg_arena *btree)
 
 __weak int scx_selftest_btree_insert_existing(btree_t __arg_arena *btree)
 {
-	u64 key = 0xbabababa;
-	u64 value = 0;
+	u64 key = 525252;
+	u64 value = 24;
 	int ret;
 
 	if (!btree)
@@ -53,7 +53,7 @@ __weak int scx_selftest_btree_insert_existing(btree_t __arg_arena *btree)
 
 __weak int scx_selftest_btree_update_existing(btree_t __arg_arena *btree)
 {
-	u64 key = 0x33333;
+	u64 key = 33333;
 	u64 value;
 	int ret;
 
@@ -94,7 +94,7 @@ __weak int scx_selftest_btree_update_existing(btree_t __arg_arena *btree)
 
 __weak int scx_selftest_btree_insert_one(btree_t __arg_arena *btree)
 {
-	u64 key = 0x202020;
+	u64 key = 202020;
 	u64 value = 0xbadcafe;
 	int ret;
 
@@ -170,10 +170,24 @@ int scx_selftest_btree(void)
 		return -ENOMEM;
 
 	SCX_BTREE_SELFTEST(find_nonexistent);
+
+	bt_print(btree);
+
 	SCX_BTREE_SELFTEST(insert_one);
+
+	bt_print(btree);
+
 	SCX_BTREE_SELFTEST(insert_existing);
+
+	bt_print(btree);
+
 	SCX_BTREE_SELFTEST(update_existing);
+
+	bt_print(btree);
+
 	SCX_BTREE_SELFTEST(insert_ten);
+
+	bt_print(btree);
 
 	return 0;
 }
