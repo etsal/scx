@@ -97,10 +97,10 @@ u64 btn_node_index(bt_node *btn, u64 key)
 	int i;
 
 	for (i = 0; i < btn->numkeys && can_loop; i++) {
-		/* 
+		/*
 		 * It's strict inequality because we
 		 * want nodes equal to the key to be to
-		 * the _right_ of the key. 
+		 * the _right_ of the key.
 		 */
 		if (key < btn->keys[i])
 			return i;
@@ -149,8 +149,8 @@ int btnode_add_internal(bt_node __arg_arena *btn, u64 ind, u64 key, bt_node __ar
 
 	nelems = btn->numkeys - ind;
 
-	/* 
-	 * XXXETSAL Update written weirdly to avoid a verifier error. 
+	/*
+	 * XXXETSAL Update written weirdly to avoid a verifier error.
 	 * Seems to have to do with arena array pointer arithmetic,
 	 * under investigation.
 	 */
@@ -237,15 +237,18 @@ u64 btnode_split_internal(bt_node *btn_new, bt_node *btn_old)
 	return key;
 }
 
-static 
+int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn);
+
+static
 int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 {
 	bt_node *btn_new, *btn_root, *btn_parent;
 	u64 key, ind;
 	int ret;
 
+	bpf_printk("SPLIT BEFORE");
 	bt_print(btree);
-	bpf_printk("SPLIT");
+
 	do {
 		btn_parent = btn_old->parent;
 		btn_new = btnode_alloc(btn_parent, btn_old->flags);
@@ -267,17 +270,18 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 
 			btree->root = btn_root;
 
+			bpf_printk("SPLIT AFTER");
 			bt_print(btree);
 
 			return 0;
 		}
-		
+
 		ind = btn_node_index(btn_parent, key);
-		
+
 		ret = btnode_add_internal(btn_parent, ind, key, btn_new);
 		if (ret)
 			return ret;
-		
+
 		btn_old = btn_old->parent;
 
 	/* Loop around while the node is full. */
@@ -360,21 +364,21 @@ int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn)
 {
 	bool isleaf = btnode_isleaf(btn);
 
-	bpf_printk("==== [%ld/%ld] BTREE %s %p ====", depth, ind, 
+	bpf_printk("==== [%ld/%ld] BTREE %s %p ====", depth, ind,
 			isleaf ? "LEAF" : "NODE", btn);
 
 	/* Hardcode it for now make it nicer once we use streams. */
 	_Static_assert(BT_LEAFSZ == 5, "Unexpected btree fanout");
 
-	bpf_printk("[KEY] %ld %ld %ld %ld %ld", 
+	bpf_printk("[KEY] %ld %ld %ld %ld %ld",
 			btn->keys[0], btn->keys[1], btn->keys[2],
 			btn->keys[3], btn->keys[4]);
 	if (isleaf) {
-		bpf_printk("[VAL] %ld %ld %ld %ld %ld", 
+		bpf_printk("[VAL] %ld %ld %ld %ld %ld",
 				btn->values[0], btn->values[1], btn->values[2],
 				btn->values[3], btn->values[4]);
 	} else {
-		bpf_printk("[VAL] 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx", 
+		bpf_printk("[VAL] 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx",
 				btn->values[0], btn->values[1], btn->values[2],
 				btn->values[3], btn->values[4]);
 	}
@@ -387,40 +391,59 @@ int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn)
 __weak
 int bt_print(btree_t __arg_arena *btree)
 {
+	const int BT_PRINT_MAXITER = 100;
 	bt_node *btn = btree->root;
 	u64 stack[BT_MAXLVL_PRINT];
 	u64 depth;
+	int i, j;
 	u64 ind;
 
-	depth = 1; 
+	depth = 0;
 	ind = 0;
 
-	while (can_loop) {
-		if (depth >= BT_MAXLVL_PRINT) {
-			bpf_printk("Max level reached, aborting btree print.");
-			return 0;
-		}
+	bpf_printk("=== BPF PRINTK START ===");
 
-		btnode_print(depth, ind, btn);
+	btnode_print(depth, ind, btn);
+
+	/* Even with can_loop, the verifier doesn't like infinite loops. */
+	for (i = 0; i < BT_PRINT_MAXITER; i++) {
 
 		/* If we can, go to the next unvisited child. */
 		if (!btnode_isleaf(btn) && ind <= btn->numkeys) {
-			btn = (bt_node *)btn->values[ind++];
-			stack[depth++] = ind;
+
+			if (btn->numkeys == 0)
+				break;
+
+			if (depth < 0 || depth >= BT_MAXLVL_PRINT)
+				return 0;
+
+			btn = (bt_node *)btn->values[ind];
+			btnode_print(depth, ind, btn);
+
+			stack[depth++] = ind + 1;
 			ind = 0;
+
+			if (depth >= BT_MAXLVL_PRINT) {
+				bpf_printk("Max level reached, aborting btree print.");
+				return 0;
+			}
 
 			continue;
 		}
 
 		/* Otherwise, go as far up as possible. */
-		while ((btnode_isleaf(btn) || ind > btn->numkeys) && can_loop) {
-			if (depth == 0)
+		for (j = 0; j < BT_MAXLVL_PRINT && (btnode_isleaf(btn) || ind > btn->numkeys) && can_loop; j++) {
+			/* Make the verifier happy. */
+			depth -= 1;
+			if (depth < 0 || depth >= BT_MAXLVL_PRINT)
 				return 0;
 
-			ind = stack[depth--];
+			ind = stack[depth];
 			btn = btn->parent;
 		}
 	}
+
+	bpf_printk("=== BPF PRINTK END ===");
 
 	return 0;
 }
