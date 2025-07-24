@@ -222,28 +222,21 @@ u64 btnode_split_internal(bt_node __arg_arena *btn_new, bt_node __arg_arena *btn
 	key = btn_old->keys[off];
 	keycopies = BT_LEAFSZ - off - 1;
 
-	bpf_printk("[%d] flags (%d)", __LINE__, btn_old->flags);
 	/* We have numkeys + 1 values. */
 	arrcpy(&btn_new->keys[0], &btn_old->keys[off + 1], keycopies);
 	arrcpy(&btn_new->values[0], &btn_old->values[off + 1], keycopies + 1);
 	btn_new->numkeys = keycopies - 1;
 
-	bpf_printk("[%d] flags (%d)", __LINE__, btn_old->flags);
 	/* Update the parent pointer for the children of the new node. */
 	for (i = 0; i <= keycopies && can_loop; i++) {
 		btn_child = (bt_node *)btn_new->values[i];
 		btn_child->parent = btn_new;
 	}
-	bpf_printk("[%d] flags (%d %d) (%d)", __LINE__, off, keycopies, btn_old->flags);
 
 	/* Wipe away the removed and copied keys. */
 	arrzero(&btn_old->keys[off], keycopies + 1);
-	bpf_printk("off-keycopies[%d- %d]", off, keycopies);
-	bpf_printk("[%d] flags (%d)", __LINE__, btn_old->flags);
 	arrzero(&btn_old->values[off + 1], keycopies);
-	bpf_printk("[%d] flags (%d)", __LINE__, btn_old->flags);
 	btn_old->numkeys = off;
-	bpf_printk("[%d] flags (%d)", __LINE__, btn_old->flags);
 
 	return key;
 }
@@ -258,9 +251,6 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 	int ret;
 
 	do {
-
-		bpf_printk("SPLIT ROUND");
-		bt_print(btree);
 
 		btn_parent = btn_old->parent;
 		btn_new = btnode_alloc(btn_parent, btn_old->flags);
@@ -285,28 +275,19 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 
 			btree->root = btn_root;
 
-			bpf_printk("ROOT SPLIT AFTER");
-			bt_print(btree);
-
 			return 0;
 		}
 
 		ind = btn_node_index(btn_parent, key);
-		bpf_printk("(%p) (%p) (%p) Adding to index %d, %d", btn_old, btree->root, btn_parent, ind, btn_old->flags);
 
 		ret = btnode_add_internal(btn_parent, ind, key, btn_new);
-		if (ret) {
-			bpf_printk("error %d", ret);
+		if (ret)
 			return ret;
-		}
 
 		btn_old = btn_old->parent;
 
 	/* Loop around while the node is full. */
 	} while (btn_old->numkeys >= BT_LEAFSZ - 1 && can_loop);
-
-	bpf_printk("SPLIT AFTER");
-	bt_print(btree);
 
 	return 0;
 }

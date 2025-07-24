@@ -180,10 +180,10 @@ __weak int scx_selftest_btree_insert_many(btree_t __arg_arena *btree)
 
 		ret = bt_find(btree, key, &value);
 		if (ret)
-			return 35 + 2 * i;
+			return 302 + 2 * i;
 
 		if (value != 2 * key)
-			return 35 + 2 * i + 1;
+			return 302 + 2 * i + 1;
 	}
 
 	return -EOPNOTSUPP;
@@ -201,25 +201,10 @@ int scx_selftest_btree(void)
 		return -ENOMEM;
 
 	SCX_BTREE_SELFTEST(find_nonexistent);
-
-	bt_print(btree);
-
 	SCX_BTREE_SELFTEST(insert_one);
-
-	bt_print(btree);
-
 	SCX_BTREE_SELFTEST(insert_existing);
-
-	bt_print(btree);
-
 	SCX_BTREE_SELFTEST(update_existing);
-
-	bt_print(btree);
-
 	SCX_BTREE_SELFTEST(insert_ten);
-
-	bt_print(btree);
-
 	SCX_BTREE_SELFTEST(insert_ten);
 
 	return 0;
