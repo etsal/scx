@@ -216,9 +216,11 @@ u64 btnode_split_leaf(bt_node *btn_new, bt_node *btn_old)
 
 u64 btnode_split_internal(bt_node *btn_new, bt_node *btn_old)
 {
+	bt_node *btn_child;
 	u64 keycopies;
 	u64 off;
 	u64 key;
+	int i;
 
 	off = (BT_LEAFSZ / 2);
 	key = btn_old->keys[off];
@@ -228,6 +230,12 @@ u64 btnode_split_internal(bt_node *btn_new, bt_node *btn_old)
 	arrcpy(&btn_new->keys[0], &btn_old->keys[off + 1], keycopies);
 	arrcpy(&btn_new->values[0], &btn_old->values[off + 1], keycopies + 1);
 	btn_new->numkeys = keycopies;
+
+	/* Update the parent pointer for the children of the new node. */
+	for (i = 0; i <= keycopies && can_loop; i++) {
+		btn_child = (bt_node *)btn_new->values[i];
+		btn_child->parent = btn_new;
+	}
 
 	/* Wipe away the removed and copied keys. */
 	arrzero(&btn_old->keys[off], keycopies + 1);
@@ -267,6 +275,9 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 			btn_root->values[0] = (u64)btn_old;
 			btn_root->values[1] = (u64)btn_new;
 			btn_root->numkeys = 1;
+
+			btn_old->parent = btn_root;
+			btn_new->parent = btn_root;
 
 			btree->root = btn_root;
 
@@ -406,8 +417,7 @@ int bt_print(btree_t __arg_arena *btree)
 	btnode_print(depth, ind, btn);
 
 	/* Even with can_loop, the verifier doesn't like infinite loops. */
-	for (i = 0; i < BT_PRINT_MAXITER; i++) {
-
+	bpf_for(i, 0, BT_PRINT_MAXITER) {
 		/* If we can, go to the next unvisited child. */
 		if (!btnode_isleaf(btn) && ind <= btn->numkeys) {
 
@@ -432,17 +442,16 @@ int bt_print(btree_t __arg_arena *btree)
 		}
 
 		/* Otherwise, go as far up as possible. */
-		for (j = 0; j < BT_MAXLVL_PRINT && (btnode_isleaf(btn) || ind > btn->numkeys) && can_loop; j++) {
-			/* Make the verifier happy. */
+		bpf_for (j, 0, BT_MAXLVL_PRINT) {
+			if (!btnode_isleaf(btn) && ind <= btn->numkeys)
+				break;
+
 			depth -= 1;
 			if (depth < 0 || depth >= BT_MAXLVL_PRINT)
 				return 0;
-			depth &= 0xf;
 
 			ind = stack[depth];
 			btn = btn->parent;
-
-			bpf_printk("%d, %d", depth + 1, ind);
 
 		}
 	}
