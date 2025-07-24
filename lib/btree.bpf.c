@@ -393,10 +393,10 @@ int bt_print(btree_t __arg_arena *btree)
 {
 	const int BT_PRINT_MAXITER = 100;
 	bt_node *btn = btree->root;
-	u64 stack[BT_MAXLVL_PRINT];
-	u64 depth;
+	u8 stack[BT_MAXLVL_PRINT];
+	u8 depth;
 	int i, j;
-	u64 ind;
+	u8 ind;
 
 	depth = 0;
 	ind = 0;
@@ -437,9 +437,13 @@ int bt_print(btree_t __arg_arena *btree)
 			depth -= 1;
 			if (depth < 0 || depth >= BT_MAXLVL_PRINT)
 				return 0;
+			depth &= 0xf;
 
 			ind = stack[depth];
 			btn = btn->parent;
+
+			bpf_printk("%d, %d", depth + 1, ind);
+
 		}
 	}
 
