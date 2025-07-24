@@ -147,13 +147,44 @@ __weak int scx_selftest_btree_insert_ten(btree_t __arg_arena *btree)
 			return 35 + 2 * i + 1;
 	}
 
-	return -EOPNOTSUPP;
+	return 0;
 }
 
 __weak int scx_selftest_btree_insert_many(btree_t __arg_arena *btree)
 {
+	u64 key, value;
+	int ret;
+	int i;
+
 	if (!btree)
 		return 1;
+
+	for (i = 0; i < 100 && can_loop; i++) {
+		key = keys[i];
+		ret = bt_insert(btree, key, 2 * key, true);
+		if (ret)
+			return 2 + 3 * i;
+
+		/* Read it back. */
+		ret = bt_find(btree, key, &value);
+		if (ret)
+			return 2 + 3 * i + 1;
+
+		if (value != 2 * key)
+			return 2 + 3 * i + 2;
+	}
+
+	/* Go find all inserted pairs. */
+	for (i = 0; i < 100 && can_loop; i++) {
+		key = keys[i];
+
+		ret = bt_find(btree, key, &value);
+		if (ret)
+			return 35 + 2 * i;
+
+		if (value != 2 * key)
+			return 35 + 2 * i + 1;
+	}
 
 	return -EOPNOTSUPP;
 }
@@ -188,6 +219,8 @@ int scx_selftest_btree(void)
 	SCX_BTREE_SELFTEST(insert_ten);
 
 	bt_print(btree);
+
+	SCX_BTREE_SELFTEST(insert_ten);
 
 	return 0;
 }
