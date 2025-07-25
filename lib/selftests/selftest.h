@@ -11,5 +11,6 @@
 
 int scx_selftest_atq(void);
 int scx_selftest_bitmap(void);
+int scx_selftest_lvqueue(void);
 int scx_selftest_minheap(void);
 int scx_selftest_topology(void);
