@@ -6,10 +6,18 @@
 
 #include "selftest.h"
 
+struct scx_buddy buddy;
+
 SEC("syscall")
 int arena_selftest(void)
 {
 	int ret;
+
+	ret = scx_buddy_init(&buddy, 16);
+	if (ret) {
+		bpf_printk("scx_buddy_init failed with %d", ret);
+		return ret;
+	}
 
 	ret = scx_selftest_atq();
 	if (ret) {
