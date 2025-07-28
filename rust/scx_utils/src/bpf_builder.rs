@@ -12,8 +12,10 @@ use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
 use std::collections::BTreeSet;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
 
@@ -300,11 +302,19 @@ impl BpfBuilder {
         deps.insert(input.to_string());
     }
 
-    fn bindgen_bpf_intf(&self) -> Result<()> {
+    fn timestamp(&self, path: &str) -> SystemTime {
+        fs::metadata(path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+
+    fn bindgen_bpf_intf(&self) -> Result<bool, anyhow::Error> {
         let (input, output) = match &self.intf_input_output {
             Some(pair) => pair,
-            None => return Ok(()),
+            None => return Ok(false),
         };
+
+        if self.timestamp(input) < self.timestamp(output) {
+            return Ok(true);
+        }
 
         // The bindgen::Builder is the main entry point to bindgen, and lets
         // you build up options for the resulting bindings.
@@ -325,7 +335,9 @@ impl BpfBuilder {
 
         bindings
             .write_to_file(self.out_dir.join(output))
-            .context("Couldn't write bindings")
+            .context("Couldn't write bindings")?;
+
+        Ok(true)
     }
 
     pub fn add_source(&mut self, input: &str) -> &mut Self {
@@ -343,10 +355,17 @@ impl BpfBuilder {
         // all the skeleton struct/member definitions.
         let linkobj = self.out_dir.join("bpf.bpf.o");
         let mut linker = Linker::new(&linkobj)?;
+        let mut modified = false;
 
         for filename in self.sources.iter() {
             let name = Path::new(filename).file_name().unwrap().to_str().unwrap();
             let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
+
+            if self.timestamp(&name) < self.timestamp(obj.to_str().unwrap()) {
+                linker.add_file(&obj)?;
+                continue;
+            }
+            modified = true;
 
             with_clang_warnings(|| {
                 SkeletonBuilder::new()
@@ -363,16 +382,18 @@ impl BpfBuilder {
 
         linker.link()?;
 
-        self.bindgen_bpf_intf()?;
+        modified |= self.bindgen_bpf_intf()?;
 
         let skel_path = self.out_dir.join("bpf_skel.rs");
 
-        SkeletonBuilder::new()
-            .obj(&linkobj)
-            .clang(&self.clang.clang)
-            .clang_args(&self.cflags)
-            .rustfmt("disable_rustfmt")
-            .generate(&skel_path)?;
+        if modified {
+            SkeletonBuilder::new()
+                .obj(&linkobj)
+                .clang(&self.clang.clang)
+                .clang_args(&self.cflags)
+                .rustfmt("disable_rustfmt")
+                .generate(&skel_path)?;
+        }
 
         let mut deps = BTreeSet::new();
         self.add_src_deps(&mut deps, input)?;
