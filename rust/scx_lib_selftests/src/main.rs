@@ -161,11 +161,12 @@ fn main() {
     )
     .unwrap();
 
+    init_libbpf_logging(Some(PrintLevel::Warn));
+
     let mut open_object = MaybeUninit::uninit();
     let mut builder = BpfSkelBuilder::default();
 
     builder.obj_builder.debug(true);
-    init_libbpf_logging(Some(PrintLevel::Debug));
 
     let mut skel = builder
         .open(&mut open_object)

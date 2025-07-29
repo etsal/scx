@@ -19,6 +19,7 @@ struct bt_node {
 	u64 flags;
 	u64 numkeys;
 	bt_node *parent;
+	size_t capacity;
 };
 
 struct btree {
