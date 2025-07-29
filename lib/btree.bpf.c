@@ -9,6 +9,9 @@
 #include <lib/sdt_task.h>
 #include <lib/btree.h>
 
+extern struct scx_buddy buddy;
+
+
 /*
  * Temporary replacements for memcpy/arrzero, which the BPF
  * LLVM backend does not support.
