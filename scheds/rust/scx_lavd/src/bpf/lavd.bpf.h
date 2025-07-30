@@ -201,5 +201,63 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_t3_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+s32 init_sys_stat(u64 now);
+int update_sys_stat(void);
+
+extern struct sys_stat		sys_stat;
+extern const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
+extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
+extern bool			have_little_core;
+
+extern volatile u64		performance_mode_ns;
+extern volatile u64		balanced_mode_ns;
+extern volatile u64		powersave_mode_ns;
+extern int			nr_cpdoms;
+
+#define debugln(fmt, ...)						\
+({									\
+	if (verbose > 0)						\
+		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+					##__VA_ARGS__);			\
+})
+
+#define traceln(fmt, ...)						\
+({									\
+	if (verbose > 1)						\
+		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+					##__VA_ARGS__);			\
+})
+
+#ifndef min
+#define min(X, Y) (((X) < (Y)) ? (X) : (Y))
+#endif
+
+#ifndef max
+#define max(X, Y) (((X) < (Y)) ? (Y) : (X))
+#endif
+
+#ifndef clamp
+#define clamp(val, lo, hi) min(max(val, lo), hi)
+#endif
+
+int do_core_compaction(void);
+int plan_x_cpdom_migration(void);
+int update_thr_perf_cri(void);
+u64 calc_avg(u64 old_val, u64 new_val);
+u64 calc_asym_avg(u64 old_val, u64 new_val);
+int reinit_active_cpumask_for_performance(void);
+int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+
+struct task_ctx *get_task_ctx(struct task_struct *p);
+struct cpu_ctx *get_cpu_ctx(void);
+struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id);
+struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
+extern struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+
+bool is_lock_holder_running(struct cpu_ctx *cpuc);
+bool have_scheduled(struct task_ctx *taskc);
+bool can_boost_slice(void);
+bool have_pending_tasks(struct cpu_ctx *cpuc);
+bool is_lat_cri(struct task_ctx *taskc);
 
 #endif /* __LAVD_H */
