@@ -20,7 +20,8 @@ use crate::Columns;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
-use crate::FilteredEventState;
+use crate::FilterItem;
+use crate::FilteredState;
 use crate::KprobeEvent;
 use crate::LlcData;
 use crate::NodeData;
@@ -56,6 +57,7 @@ use ratatui::{
     widgets::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
         RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
+        TableState,
     },
     Frame,
 };
@@ -117,7 +119,9 @@ pub struct App<'a> {
     perf_events: Vec<String>,
     kprobe_events: Vec<String>,
     kprobe_links: Vec<Link>,
-    filtered_events_state: Arc<StdMutex<FilteredEventState>>,
+
+    filtered_state: Arc<StdMutex<FilteredState>>,
+    filtering: bool,
 
     // stats from scxtop's bpf side
     bpf_stats: BpfStats,
@@ -217,7 +221,7 @@ impl<'a> App<'a> {
         let mut initial_kprobe_events_list = available_kprobe_events()?;
         initial_kprobe_events_list.sort();
 
-        let filtered_events_state = Arc::new(StdMutex::new(FilteredEventState::default()));
+        let filtered_state = Arc::new(StdMutex::new(FilteredState::default()));
 
         let mut stats_client = StatsClient::new();
         let stats_socket_path = config.stats_socket_path();
@@ -242,7 +246,7 @@ impl<'a> App<'a> {
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
 
-        let app = Self {
+        let mut app = Self {
             config,
             localize: true,
             hw_pressure,
@@ -278,7 +282,8 @@ impl<'a> App<'a> {
             perf_events: initial_perf_events_list,
             kprobe_events: initial_kprobe_events_list,
             kprobe_links: Vec::new(),
-            filtered_events_state,
+            filtered_state,
+            filtering: false,
             events_list_size: 1,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
@@ -291,6 +296,9 @@ impl<'a> App<'a> {
             frames_since_update: 0,
             max_fps: 1,
         };
+
+        // Set the initial filter state
+        app.filter_events();
 
         Ok(app)
     }
@@ -315,7 +323,13 @@ impl<'a> App<'a> {
         }
         self.state = state;
 
-        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+        if self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+        {
+            self.filtered_state.lock().unwrap().reset();
             self.filter_events();
         }
 
@@ -337,6 +351,11 @@ impl<'a> App<'a> {
     /// Sets the theme of the application.
     pub fn set_theme(&mut self, theme: AppTheme) {
         self.config.set_theme(theme)
+    }
+
+    /// Returns whether we are currently filtering or not
+    pub fn filtering(&self) -> bool {
+        self.filtering
     }
 
     /// Stop all active profiling events.
@@ -542,6 +561,11 @@ impl<'a> App<'a> {
         // If we weren't able to update the stats, it is because the process is no longer alive
         for key in to_remove {
             self.proc_data.remove(&key);
+        }
+
+        // Now that we updated the process data, we need to also update the filtered data
+        if self.filtering {
+            self.filter_events();
         }
 
         if self.state == AppState::Scheduler {
@@ -1644,17 +1668,6 @@ impl<'a> App<'a> {
                 let node_areas = Layout::vertical(constraints).split(area);
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
-                    let node_constraints =
-                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
-                    let [top, bottom] = Layout::vertical(node_constraints).areas(node_areas[i]);
-
-                    let node_cpus = node.all_cpus.len();
-                    let col_scale = if node_cpus <= 128 { 2 } else { 4 };
-
-                    let cpus_constraints =
-                        vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
-                    let cpus_areas = Layout::horizontal(cpus_constraints).split(bottom);
-
                     let node_iter = self
                         .cpu_data
                         .values()
@@ -1718,6 +1731,15 @@ impl<'a> App<'a> {
                         .border_type(BorderType::Rounded)
                         .style(self.theme().border_style());
 
+                    let node_area = node_areas[i];
+                    let node_cpus = node.all_cpus.len();
+                    let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+
+                    let cpus_constraints =
+                        vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
+                    let cpus_areas =
+                        Layout::horizontal(cpus_constraints).split(node_block.inner(node_area));
+
                     let mut bar_col_data: Vec<Vec<Bar>> = vec![Vec::new(); 4];
                     let _: Vec<_> = node
                         .all_cpus
@@ -1728,24 +1750,9 @@ impl<'a> App<'a> {
                             bar_col_data[j % col_scale as usize].push(cpu_bar);
                         })
                         .collect();
-                    frame.render_widget(node_block, top);
+
                     for (j, col_data) in bar_col_data.iter().enumerate() {
-                        let cpu_block = Block::new()
-                            .borders(
-                                if j == col_scale as usize - 1
-                                    || j % col_scale as usize == col_scale as usize - 1
-                                {
-                                    Borders::RIGHT | Borders::BOTTOM
-                                } else if j == 0 || j % col_scale as usize == 0 {
-                                    Borders::LEFT | Borders::BOTTOM
-                                } else {
-                                    Borders::BOTTOM
-                                },
-                            )
-                            .border_type(BorderType::Rounded)
-                            .style(self.theme().border_style());
                         let bar_chart = BarChart::default()
-                            .block(cpu_block)
                             .data(BarGroup::default().bars(col_data))
                             .max(stats.max)
                             .direction(Direction::Horizontal)
@@ -1754,6 +1761,7 @@ impl<'a> App<'a> {
                             .bar_width(1);
                         frame.render_widget(bar_chart, cpus_areas[j % col_scale as usize]);
                     }
+                    frame.render_widget(node_block, node_area);
                 }
             }
         }
@@ -2077,7 +2085,7 @@ impl<'a> App<'a> {
             );
         frame.render_widget(title, chunks[0]);
 
-        let filtered_state = self.filtered_events_state.lock().unwrap();
+        let filtered_state = self.filtered_state.lock().unwrap();
 
         let events: Vec<Line> = filtered_state
             .list
@@ -2085,9 +2093,9 @@ impl<'a> App<'a> {
             .enumerate()
             .map(|(i, event)| {
                 if i == filtered_state.selected {
-                    Line::from(event.clone()).fg(self.theme().text_important_color())
+                    Line::from(event.as_string()).fg(self.theme().text_important_color())
                 } else {
-                    Line::from(event.clone()).fg(self.theme().text_color())
+                    Line::from(event.as_string()).fg(self.theme().text_color())
                 }
             })
             .collect();
@@ -2218,6 +2226,11 @@ impl<'a> App<'a> {
 
     /// Render the process view.
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let height = if area.height > 0 { area.height - 1 } else { 1 };
+        if height != self.events_list_size {
+            self.events_list_size = height
+        }
+
         let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
 
         let header = visible_columns
@@ -2241,28 +2254,62 @@ impl<'a> App<'a> {
                 Line::from(format!("Processes (total: {})", self.proc_data.len()))
                     .style(self.theme().title_style())
                     .centered(),
+            )
+            .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
             );
 
-        let mut sorted_view: Vec<(&i32, &ProcData)> = self.proc_data.iter().collect();
-        sorted_view.sort_unstable_by(|a, b| {
+        // We want to hold the lock for as short as possible
+        let (mut filtered_processes, selected): (Vec<(i32, &ProcData)>, usize) = {
+            let filtered_state = self.filtered_state.lock().unwrap();
+            let processes = filtered_state
+                .list
+                .iter()
+                .filter_map(|item| {
+                    item.as_int()
+                        .and_then(|pid| self.proc_data.get(&pid).map(|data| (pid, data)))
+                })
+                .collect();
+            (processes, filtered_state.selected)
+        };
+
+        filtered_processes.sort_unstable_by(|a, b| {
             b.1.cpu_util_perc
                 .partial_cmp(&a.1.cpu_util_perc)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.1.threads.len().cmp(&a.1.threads.len()))
         });
 
-        let rows = sorted_view.into_iter().map(|(i, data)| {
-            visible_columns
-                .iter()
-                .map(|col| Cell::from((col.value_fn)(*i, data)))
-                .collect::<Row>()
-                .height(1)
-                .style(self.theme().text_color())
-        });
+        let rows = filtered_processes
+            .iter()
+            .enumerate()
+            .map(|(i, (tgid, data))| {
+                visible_columns
+                    .iter()
+                    .map(|col| Cell::from((col.value_fn)(*tgid, data)))
+                    .collect::<Row>()
+                    .height(1)
+                    .style(if i == selected {
+                        self.theme().text_important_color()
+                    } else {
+                        self.theme().text_color()
+                    })
+            });
 
         let table = Table::new(rows, constraints).header(header).block(block);
 
-        frame.render_widget(table, area);
+        frame.render_stateful_widget(table, area, &mut TableState::new().with_offset(selected));
 
         Ok(())
     }
@@ -2300,8 +2347,12 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node)
             && filtered_state.scroll < filtered_state.count - 1
         {
             filtered_state.scroll += 1;
@@ -2311,8 +2362,12 @@ impl<'a> App<'a> {
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node)
             && filtered_state.scroll > 0
         {
             filtered_state.scroll -= 1;
@@ -2322,8 +2377,12 @@ impl<'a> App<'a> {
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node)
             && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
             filtered_state.scroll += self.events_list_size - 1;
@@ -2333,8 +2392,13 @@ impl<'a> App<'a> {
 
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+        {
             if filtered_state.scroll > self.events_list_size {
                 filtered_state.scroll -= self.events_list_size - 1;
                 filtered_state.selected -= (self.events_list_size - 1) as usize;
@@ -2348,14 +2412,15 @@ impl<'a> App<'a> {
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) -> Result<()> {
         if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+            self.event_input_buffer.clear();
             let selected = {
-                let mut filtered_state = self.filtered_events_state.lock().unwrap();
+                let mut filtered_state = self.filtered_state.lock().unwrap();
                 if filtered_state.list.is_empty() {
                     return Ok(());
                 }
                 let selected = filtered_state.list[filtered_state.selected].clone();
                 filtered_state.reset();
-                selected
+                selected.as_string()
             };
 
             let event = match self.state {
@@ -2841,24 +2906,44 @@ impl<'a> App<'a> {
         let filtered_events_list = match self.state {
             AppState::PerfEvent => {
                 search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
+                    .into_iter()
+                    .map(FilterItem::String)
+                    .collect()
             }
             AppState::KprobeEvent => {
                 search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
+                    .into_iter()
+                    .map(FilterItem::String)
+                    .collect()
             }
+            AppState::Default | AppState::Llc | AppState::Node => self
+                .proc_data
+                .iter()
+                .filter(|(_, proc_data)| {
+                    search::contains_spread(&proc_data.process_name, &self.event_input_buffer)
+                        .is_some()
+                        || search::contains_spread(
+                            &proc_data.tgid.to_string(),
+                            &self.event_input_buffer,
+                        )
+                        .is_some()
+                })
+                .map(|(tgid, _)| FilterItem::Int(*tgid))
+                .collect(),
             _ => vec![],
         };
 
-        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        let mut filtered_state = self.filtered_state.lock().unwrap();
 
         filtered_state.list = filtered_events_list;
         filtered_state.count = filtered_state.list.len() as u16;
 
         if (filtered_state.count as usize) <= filtered_state.selected {
-            filtered_state.selected = (filtered_state.count as usize) - 1;
+            filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
         }
 
         if filtered_state.count <= filtered_state.scroll {
-            filtered_state.scroll = filtered_state.count - 1;
+            filtered_state.scroll = filtered_state.count.saturating_sub(1);
         }
     }
 
@@ -2895,7 +2980,6 @@ impl<'a> App<'a> {
             Action::PageDown => self.on_pg_down(),
             Action::Enter => {
                 self.on_enter()?;
-                self.event_input_buffer.clear();
             }
             Action::SetState(state) => {
                 if *state == self.state {
@@ -3039,6 +3123,13 @@ impl<'a> App<'a> {
                     self.should_quit.store(true, Ordering::Relaxed);
                 }
             },
+            Action::Filter => match self.state {
+                AppState::Default | AppState::Llc | AppState::Node => {
+                    self.filtering = true;
+                    self.filter_events();
+                }
+                _ => {}
+            },
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
                 self.filter_events();
@@ -3052,6 +3143,15 @@ impl<'a> App<'a> {
                     self.event_input_buffer.clear();
                     self.filter_events();
                     self.handle_action(&Action::SetState(self.prev_state.clone()))?;
+                }
+                AppState::Default | AppState::Llc | AppState::Node => {
+                    if self.filtering {
+                        self.filtering = false;
+                        self.event_input_buffer.clear();
+                        self.filter_events();
+                    } else {
+                        self.handle_action(&Action::Quit)?;
+                    }
                 }
                 _ => self.handle_action(&Action::Quit)?,
             },
