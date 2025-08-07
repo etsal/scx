@@ -9,8 +9,6 @@
 
 #include "sdt_task.h"
 
-char _license[] SEC("license") = "GPL";
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
