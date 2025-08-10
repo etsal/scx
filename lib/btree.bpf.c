@@ -148,11 +148,12 @@ static bt_node *bt_find_leaf(btree_t __arg_arena *btree, u64 key)
 __weak
 int btnode_remove_internal(bt_node __arg_arena *btn, u64 ind)
 {
+	volatile u64 __arena *val;
 	u64 nelems;
 
-	/* We can have up to BT_LEAFSZ - 1 keys and BT_LEAFSZ values.*/
-	if (unlikely(ind >= BT_LEAFSZ - 1)) {
-		bpf_printk("internal node overflow");
+	/* We can have to btn->numkeys - 1 keys and btn->numkeys values.*/
+	if (unlikely(ind > btn->numkeys - 1)) {
+		bpf_printk("internal removal overflow (%ld, %ld)", ind, btn->numkeys - 1);
 		return -EINVAL;
 	}
 
@@ -167,7 +168,12 @@ int btnode_remove_internal(bt_node __arg_arena *btn, u64 ind)
 	if (nelems)
 		arrcpy(&btn->values[ind], &btn->values[ind + 1], nelems);
 
-	btn->values[btn->numkeys + 1] = 0;
+	/*
+	 * XXXETSAL The verifier currently complains when doing complex pointer
+	 * arithmetic. Break the computation down to help it along.
+	 */
+	val = (u64 __arena *)&btn->values;
+	val[btn->numkeys + 1] = 0;
 
 	btn->numkeys -= 1;
 
@@ -181,7 +187,7 @@ int btnode_add_internal(bt_node __arg_arena *btn, u64 ind, u64 key, bt_node __ar
 
 	/* We can have up to BT_LEAFSZ - 1 keys and BT_LEAFSZ values.*/
 	if (unlikely(ind >= BT_LEAFSZ - 1)) {
-		bpf_printk("internal node overflow");
+		bpf_printk("internal add overflow (%ld, %ld)", ind, BT_LEAFSZ - 1);
 		return -EINVAL;
 	}
 
@@ -207,14 +213,14 @@ static int btnode_remove_leaf(bt_node *btn, u64 ind)
 {
 	u64 nelems;
 
-	if (unlikely(ind > btn->numkeys)) {
-		bpf_printk("leaf node overflow (%ld,  %ld)", ind, btn->numkeys);
+	if (unlikely(ind >= btn->numkeys)) {
+		bpf_printk("leaf remove overflow (%ld,  %ld)", ind, btn->numkeys);
 		return -EINVAL;
 	}
 
 	nelems = btn->numkeys - ind;
 
-	/* Scooch the keys over and add the new one. */
+	/* Overwite the key with the rest of the array. */
 	arrcpy(&btn->keys[ind], &btn->keys[ind + 1], nelems);
 	arrcpy(&btn->values[ind], &btn->values[ind + 1], nelems);
 
@@ -231,7 +237,7 @@ static int btnode_add_leaf(bt_node *btn, u64 ind, u64 key, u64 value)
 	u64 nelems;
 
 	if (unlikely(ind > btn->numkeys)) {
-		bpf_printk("leaf node overflow (%ld,  %ld)", ind, btn->numkeys);
+		bpf_printk("leaf add overflow (%ld,  %ld)", ind, btn->numkeys);
 		return -EINVAL;
 	}
 
@@ -401,11 +407,111 @@ int bt_insert(btree_t __arg_arena *btree, u64 key, u64 value, bool update)
 	return bt_split(btree, btn);
 }
 
+static inline int bt_balance_left(bt_node *parent, int ind, bt_node *left, bt_node *right)
+{
+	u64 key = left->keys[left->numkeys - 1];
+	bt_node *value = (bt_node *)left->values[left->numkeys];
+	int ret;
+
+	ret = btnode_remove_internal(left, left->numkeys);
+	if (unlikely(ret))
+		return ret;
+
+	ret = btnode_add_internal(right, 0, key, value);
+	if (unlikely(ret))
+		return ret;
+
+	parent->keys[ind] = key;
+	return 0;
+}
+
+static inline int bt_balance_right(bt_node *parent, int ind, bt_node *left, bt_node *right)
+{
+	u64 key = right->keys[0];
+	bt_node *value = (bt_node *)left->values[0];
+	int ret;
+
+	ret = btnode_remove_internal(right, 0);
+	if (unlikely(ret))
+		return ret;
+
+	ret = btnode_add_internal(left, left->numkeys, key, value);
+	if (unlikely(ret))
+		return ret;
+
+	parent->keys[ind] = right->keys[0];
+	return 0;
+}
+
+__weak
+bool bt_balance(bt_node __arg_arena *btn, bt_node __arg_arena *parent, int ind)
+{
+	volatile bt_node *tmp;
+	bt_node *sibling;
+
+	/* Try to steal from the left sibling node to avoid merging. */
+
+	if (ind == 0)
+		goto steal_right;
+
+	sibling = (bt_node *)parent->values[ind - 1];
+	if (sibling->numkeys - 1 < BT_LEAFSZ / 2)
+		goto steal_right;
+
+
+	if (!bt_balance_left(parent, ind - 1, sibling, btn))
+		return true;
+
+steal_right:
+
+	/* Failed to steal from the left node, look for the right node. */
+	if (ind >= parent->numkeys)
+		return false;
+
+	tmp = (bt_node *)parent->values;
+	sibling = (bt_node *)&tmp[ind + 1];
+	if (sibling->numkeys - 1 < BT_LEAFSZ / 2) {
+		return false;
+	}
+
+	return bt_balance_right(parent, ind, btn, sibling);
+}
+
+static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int ind)
+{
+	bt_node *left, *right;
+	u64 key;
+
+	if (ind == 0) {
+		left = btn;
+		right = (bt_node *)parent->values[ind + 1];
+		key = parent->keys[ind];
+	} else {
+		left = (bt_node *)parent->values[ind - 1];
+		right = btn;
+		key = parent->keys[ind - 1];
+	}
+
+	if (unlikely(left->numkeys + right->numkeys + 2) > BT_LEAFSZ)
+		return -E2BIG;
+
+	left->keys[left->numkeys] = key;
+	arrcpy(&left->keys[left->numkeys + 1], right->keys, right->numkeys);
+	arrcpy(&left->values[left->numkeys + 1], right->values, right->numkeys + 1);
+
+	left->numkeys = left->numkeys + 1 + right->numkeys;
+	btnode_remove_internal(parent, ind + 1);
+	btnode_free(btree, right);
+
+	return 0;
+}
+
 __weak
 int bt_remove(btree_t __arg_arena *btree, u64 key)
 {
-	bt_node *btn;
+	bt_node *btn, *parent;
 	u64 ind;
+	int ret;
 
 	btn = bt_find_leaf(btree, key);
 	if (!btn)
@@ -418,7 +524,37 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 
 	btnode_remove_leaf(btn, ind);
 
-	/* XXXETSAL: Add merging logic (if we want to). */
+	/* Do not load balance leaves. */
+	if (btn->numkeys || btnode_isroot(btn))
+		return 0;
+
+	parent = btn->parent;
+	ind = btn_node_index(parent, btn->keys[0]);
+
+	ret = btnode_remove_internal(parent, ind);
+	if (unlikely(ret))
+		return ret;
+
+	btnode_free(btree, parent);
+
+	btn = parent;
+
+	while (btn->parent && btn->numkeys < BT_LEAFSZ / 2 && can_loop) {
+		parent = btn->parent;
+		ind = btn_node_index(parent, btn->keys[0]);
+
+		/* Try to avoid merging. */
+		if (bt_balance(btn, parent, ind)) {
+			btn = btn->parent;
+			continue;
+		}
+
+		ret = bt_merge(btree, btn, parent, ind);
+		if (ret)
+			return ret;
+
+		btn = parent;
+	}
 
 	return 0;
 }
