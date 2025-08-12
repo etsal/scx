@@ -194,7 +194,7 @@ int btnode_remove_internal(bt_node __arg_arena *btn, u64 ind)
 	return 0;
 }
 
-/* The lower variable denotes whether the key is the upper or the lower bound for the value. 1*/
+/* The variable "lower" denotes whether the key is the upper or the lower bound for the value. 1*/
 __weak
 int btnode_add_internal(bt_node __arg_arena *btn, u64 ind, u64 key, bt_node __arg_arena *value, bool lower)
 {
@@ -206,18 +206,21 @@ int btnode_add_internal(bt_node __arg_arena *btn, u64 ind, u64 key, bt_node __ar
 		return -EINVAL;
 	}
 
-	nelems = btn->numkeys - ind;
-
-	if (nelems)
+	if (ind < btn->numkeys) {
+		nelems = btn->numkeys - ind;
 		arrcpy(&btn->keys[ind + 1], &btn->keys[ind], nelems);
+	}
+
 	btn->keys[ind] = key;
 
 	/* If the key is the upper bound of the new node, add the node to its right. */
 	if (lower)
 		ind += 1;
 
-	if (nelems)
+	if (ind <= btn->numkeys + 1) {
+		nelems = btn->numkeys + 1 - ind;
 		arrcpy(&btn->values[ind + 1], &btn->values[ind], nelems);
+	}
 
 	btn->values[ind] = (u64)value;
 
@@ -484,9 +487,8 @@ steal_right:
 
 	tmp = (bt_node *)parent->values;
 	sibling = (bt_node *)&tmp[ind + 1];
-	if (sibling->numkeys - 1 < BT_LEAFSZ / 2) {
+	if (sibling->numkeys - 1 < BT_LEAFSZ / 2)
 		return false;
-	}
 
 	return bt_balance_right(parent, ind, btn, sibling);
 }
