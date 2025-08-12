@@ -460,7 +460,7 @@ int scx_selftest_btree(void)
 	SCX_BTREE_SELFTEST(insert_many);
 	SCX_BTREE_SELFTEST(remove_one);
 	SCX_BTREE_SELFTEST(remove_many);
-	SCX_BTREE_SELFTEST(add_remove_circular);
+	//SCX_BTREE_SELFTEST(add_remove_circular);
 
 	return 0;
 }

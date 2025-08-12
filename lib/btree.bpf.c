@@ -172,12 +172,13 @@ int btnode_remove_internal(bt_node __arg_arena *btn, u64 ind)
 		return -EINVAL;
 	}
 
-	nelems = btn->numkeys - ind;
+	/* If we're removing the rightmost value, we don't need shifting. */
+	if (ind < btn->numkeys) {
+		nelems = btn->numkeys - ind;
 
-	if (nelems)
 		arrcpy(&btn->keys[ind], &btn->keys[ind + 1], nelems - 1);
-	arrcpy(&btn->values[ind], &btn->values[ind + 1], nelems);
-
+		arrcpy(&btn->values[ind], &btn->values[ind + 1], nelems);
+	}
 
 	/*
 	 * XXXETSAL The verifier currently complains when doing complex pointer
@@ -495,15 +496,16 @@ static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int in
 	bt_node *left, *right;
 	u64 key;
 
-	if (ind == 0) {
-		left = btn;
-		right = (bt_node *)parent->values[ind + 1];
-		key = parent->keys[ind];
-	} else {
-		left = (bt_node *)parent->values[ind - 1];
-		right = btn;
-		key = parent->keys[ind - 1];
-	}
+	/* 
+	 * Merge with our left neighbor, unless we're the leftmost node. 
+	 * Index is always that of the left node. 
+	 */
+	if (ind > 0)
+		ind -= 1;
+
+	left = (bt_node *)parent->values[ind];
+	right = (bt_node *)parent->values[ind + 1];
+	key = parent->keys[ind];
 
 	if (unlikely(left->numkeys + right->numkeys + 2) > BT_LEAFSZ)
 		return -E2BIG;
@@ -566,9 +568,8 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 
 	parent = btn->parent;
 	ind = btn_node_index_by_val(parent, btn);
-	if (unlikely(parent->values[ind] != (u64)btn)) {
+	if (unlikely(ind > parent->numkeys || parent->values[ind] != (u64)btn))
 		return -EINVAL;
-	}
 
 	ret = btnode_remove_internal(parent, ind);
 	if (unlikely(ret))
@@ -578,7 +579,7 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 
 	btn = parent;
 
-	while (btn->parent && btn->numkeys < BT_LEAFSZ / 2 && can_loop) {
+	while (!btnode_isroot(btn) && btn->numkeys < BT_LEAFSZ / 2 && can_loop) {
 		parent = btn->parent;
 
 		ret = bt_rebalance(btree, parent, btn);
@@ -586,6 +587,13 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 			return ret;
 
 		btn = parent;
+	}
+
+	/* Root switch if the root has a single child. */
+	if (btnode_isroot(btn) && !btnode_isleaf(btn) && !btn->numkeys) {
+		btree->root = (bt_node *)btn->values[0];
+		btree->root->parent = NULL;
+		btnode_free(btree, btn);
 	}
 
 	return 0;
