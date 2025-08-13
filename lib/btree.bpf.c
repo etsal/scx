@@ -166,8 +166,6 @@ int btnode_remove_internal(bt_node __arg_arena *btn, u64 ind)
 	volatile u64 __arena *tmp;
 	u64 nelems;
 
-	bpf_printk("Removing (%p, %d)", btn, ind);
-
 	/* We can have to btn->numkeys - 1 keys and btn->numkeys values.*/
 	if (unlikely(ind > btn->numkeys)) {
 		bpf_printk("internal removal overflow (%ld, %ld)", ind, btn->numkeys - 1);
@@ -511,9 +509,9 @@ static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int in
 		bt_print(btree);
 	}
 
-	/* 
-	 * Merge with our left neighbor, unless we're the leftmost node. 
-	 * Index is always that of the left node. 
+	/*
+	 * Merge with our left neighbor, unless we're the leftmost node.
+	 * Index is always that of the left node.
 	 */
 	if (ind > 0)
 		ind -= 1;
@@ -673,8 +671,8 @@ int btnode_print(u64 depth, u64 ind, bt_node __arg_arena *btn)
 				btn->values[0], btn->values[1], btn->values[2],
 				btn->values[3], btn->values[4]);
 	} else {
-		/* 
-		 * We're typecasting to pointers to actually get the value we 
+		/*
+		 * We're typecasting to pointers to actually get the value we
 		 * see during execution.
 		 */
 		bpf_printk("[VAL] 0x%p 0x%p 0x%p 0x%p 0x%p",
