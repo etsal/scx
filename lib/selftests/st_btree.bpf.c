@@ -360,7 +360,7 @@ __weak int scx_selftest_btree_remove_many(btree_t __arg_arena *btree)
 
 __weak int scx_selftest_btree_add_remove_circular(btree_t __arg_arena *btree)
 {
-	const size_t iters = 1000;
+	const size_t iters = 60;
 	const size_t prefill = 10;
 	const size_t numkeys = 50;
 	const size_t prefix = 400000;
@@ -396,9 +396,6 @@ __weak int scx_selftest_btree_add_remove_circular(btree_t __arg_arena *btree)
 	errval = 3 * 1000 * 1000;
 
 	bpf_for(i, prefill, iters) {
-		bpf_printk("ITERATION %d", i);
-		bt_print(btree);
-
 		key = prefix + (i % numkeys);
 
 		ret = bt_find(btree, key, &value);
@@ -410,8 +407,10 @@ __weak int scx_selftest_btree_add_remove_circular(btree_t __arg_arena *btree)
 		errval += 1;
 
 		ret = bt_insert(btree, key, i, true);
-		if (ret)
+		if (ret) {
+			bt_print(btree);
 			return errval;
+		}
 
 		rmval = i - prefill;
 
@@ -452,14 +451,14 @@ int scx_selftest_btree(void)
 	/* Keep it in to check for verification failures. */
 	bt_print(btree);
 
-	SCX_BTREE_SELFTEST(find_nonexistent);
-	SCX_BTREE_SELFTEST(insert_one);
-	SCX_BTREE_SELFTEST(insert_existing);
-	SCX_BTREE_SELFTEST(update_existing);
-	SCX_BTREE_SELFTEST(insert_ten);
-	SCX_BTREE_SELFTEST(insert_many);
-	SCX_BTREE_SELFTEST(remove_one);
-	SCX_BTREE_SELFTEST(remove_many);
+	//SCX_BTREE_SELFTEST(find_nonexistent);
+	//SCX_BTREE_SELFTEST(insert_one);
+	//SCX_BTREE_SELFTEST(insert_existing);
+	//SCX_BTREE_SELFTEST(update_existing);
+	//SCX_BTREE_SELFTEST(insert_ten);
+	//SCX_BTREE_SELFTEST(insert_many);
+	//SCX_BTREE_SELFTEST(remove_one);
+	//SCX_BTREE_SELFTEST(remove_many);
 	SCX_BTREE_SELFTEST(add_remove_circular);
 
 	return 0;

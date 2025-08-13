@@ -166,6 +166,8 @@ int btnode_remove_internal(bt_node __arg_arena *btn, u64 ind)
 	volatile u64 __arena *tmp;
 	u64 nelems;
 
+	bpf_printk("Removing (%p, %d)", btn, ind);
+
 	/* We can have to btn->numkeys - 1 keys and btn->numkeys values.*/
 	if (unlikely(ind > btn->numkeys)) {
 		bpf_printk("internal removal overflow (%ld, %ld)", ind, btn->numkeys - 1);
@@ -427,6 +429,7 @@ static inline int bt_balance_left(bt_node *parent, int ind, bt_node *left, bt_no
 	bt_node *value = (bt_node *)left->values[left->numkeys];
 	int ret;
 
+	bpf_printk("%s:%d", __func__, __LINE__);
 	ret = btnode_remove_internal(left, left->numkeys);
 	if (unlikely(ret))
 		return ret;
@@ -447,6 +450,8 @@ static inline int bt_balance_right(bt_node *parent, int ind, bt_node *left, bt_n
 	bt_node *value = (bt_node *)right->values[0];
 	int ret;
 
+	bpf_printk("%s:%d %p/%d %p %p ", __func__, __LINE__, parent, ind, left, right);
+	btnode_print_path(left);
 	ret = btnode_remove_internal(right, 0);
 	if (unlikely(ret))
 		return ret;
@@ -495,8 +500,16 @@ steal_right:
 
 static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int ind)
 {
+	volatile u64 __arena *tmp;
 	bt_node *left, *right;
+	bt_node *child;
 	u64 key;
+	int i;
+
+	if (btnode_isroot(parent)) {
+		bpf_printk("BEFORE MERGE %p (parent %p)", btn, parent);
+		bt_print(btree);
+	}
 
 	/* 
 	 * Merge with our left neighbor, unless we're the leftmost node. 
@@ -514,9 +527,18 @@ static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int in
 
 	left->keys[left->numkeys] = key;
 	arrcpy(&left->keys[left->numkeys + 1], right->keys, right->numkeys);
-	arrcpy(&left->values[left->numkeys + 1], right->values, right->numkeys + 1);
 
-	left->numkeys = left->numkeys + 1 + right->numkeys;
+	for (i = 0; i <= right->numkeys && can_loop; i++) {
+		child = (bt_node *)right->values[i];
+		child->parent = left;
+
+		tmp = left->values;
+		tmp[left->numkeys + 1 + i] = (u64)child;
+	}
+
+	left->numkeys += right->numkeys + 1;
+
+	bpf_printk("%s:%d", __func__, __LINE__);
 	btnode_remove_internal(parent, ind + 1);
 	btnode_free(btree, right);
 
@@ -533,9 +555,11 @@ int bt_rebalance(btree_t __arg_arena *btree, bt_node __arg_arena *parent, bt_nod
 	if (unlikely(ind > parent->numkeys))
 		return -EINVAL;
 
+#if 0
 	/* Try to avoid merging. */
 	if (bt_balance(btn, parent, ind))
 		return 0;
+#endif
 
 	ret = bt_merge(btree, btn, parent, ind);
 	if (ret)
@@ -573,6 +597,7 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 	if (unlikely(ind > parent->numkeys || parent->values[ind] != (u64)btn))
 		return -EINVAL;
 
+	bpf_printk("%s:%d", __func__, __LINE__);
 	ret = btnode_remove_internal(parent, ind);
 	if (unlikely(ret))
 		return ret;
@@ -596,6 +621,10 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 		btree->root = (bt_node *)btn->values[0];
 		btree->root->parent = NULL;
 		btnode_free(btree, btn);
+
+		bpf_printk("AFTER ROOT SWITCH");
+		bt_print(btree);
+
 	}
 
 	return 0;

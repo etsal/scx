@@ -8,7 +8,6 @@
 #define BT_LEAFSZ 5
 
 #define BT_F_LEAF (0x1)
-#define BT_F_ROOT (0x2)
 
 struct bt_node;
 typedef struct bt_node __arena bt_node;
