@@ -104,12 +104,20 @@ u64 bt_create_internal(void)
 	return (u64)btree;
 }
 
-static
-u64 btn_node_index_by_key(bt_node *btn, u64 key)
+static bool merging;
+
+__weak
+u64 btn_node_index_by_key(bt_node __arg_arena *btn, u64 key)
 {
 	int i;
 
+	if (merging) {
+		bpf_printk("Looking for key %ld, there are %ld keys", key, btn->numkeys);
+		btnode_print(0, 0, btn);
+	}
+
 	for (i = 0; i < btn->numkeys && can_loop; i++) {
+		bpf_printk("Comparing %ld, %ld", key, btn->keys[i]);
 		/*
 		 * It's strict inequality because we
 		 * want nodes equal to the key to be to
@@ -118,6 +126,8 @@ u64 btn_node_index_by_key(bt_node *btn, u64 key)
 		if (key < btn->keys[i])
 			return i;
 	}
+
+	bpf_printk("Failed to find upper bound for %ld", key);
 
 	return btn->numkeys;
 }
@@ -199,6 +209,8 @@ __weak
 int btnode_add_internal(bt_node __arg_arena *btn, u64 ind, u64 key, bt_node __arg_arena *value, bool lower)
 {
 	u64 nelems;
+
+	bpf_printk("Add internal with %d %d", ind, lower);
 
 	/* We can have up to BT_LEAFSZ - 1 keys and BT_LEAFSZ values.*/
 	if (unlikely(ind >= BT_LEAFSZ - 1)) {
@@ -325,6 +337,11 @@ u64 btnode_split_internal(bt_node __arg_arena *btn_new, bt_node __arg_arena *btn
 	arrzero(&btn_old->values[off + 1], keycopies);
 	btn_old->numkeys = off;
 
+	bpf_printk("LEFT NODE");
+	btnode_print(0, 0, btn_old);
+	bpf_printk("RIGHT NODE");
+	btnode_print(0, 0, btn_old);
+
 	return key;
 }
 
@@ -335,7 +352,11 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 	u64 key, ind;
 	int ret;
 
+
 	do {
+
+		bpf_printk("PRE SPLIT");
+		bt_print(btree);
 
 		btn_parent = btn_old->parent;
 		btn_new = btnode_alloc(btree, btn_parent, btn_old->flags);
@@ -367,7 +388,9 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 			return 0;
 		}
 
+		merging = true;
 		ind = btn_node_index_by_key(btn_parent, key);
+		merging = false;
 
 		ret = btnode_add_internal(btn_parent, ind, key, btn_new, true);
 		if (ret) {
@@ -380,6 +403,9 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 	/* Loop around while the node is full. */
 	} while (btn_old->numkeys >= BT_LEAFSZ - 1 && can_loop);
 
+	bpf_printk("POST SPLIT");
+	bt_print(btree);
+
 	return 0;
 }
 
@@ -389,6 +415,8 @@ int bt_insert(btree_t __arg_arena *btree, u64 key, u64 value, bool update)
 	bt_node *btn;
 	u64 ind;
 	int ret;
+
+	bpf_printk("Adding %ld", key);
 
 	btn = bt_find_leaf(btree, key);
 	if (!btn)
@@ -504,11 +532,6 @@ static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int in
 	u64 key;
 	int i;
 
-	if (btnode_isroot(parent)) {
-		bpf_printk("BEFORE MERGE %p (parent %p)", btn, parent);
-		bt_print(btree);
-	}
-
 	/*
 	 * Merge with our left neighbor, unless we're the leftmost node.
 	 * Index is always that of the left node.
@@ -536,7 +559,6 @@ static inline int bt_merge(btree_t *btree, bt_node *btn, bt_node *parent, int in
 
 	left->numkeys += right->numkeys + 1;
 
-	bpf_printk("%s:%d", __func__, __LINE__);
 	btnode_remove_internal(parent, ind + 1);
 	btnode_free(btree, right);
 
@@ -573,6 +595,8 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 	u64 ind;
 	int ret;
 
+	bpf_printk("Removing %ld", key);
+
 	btn = bt_find_leaf(btree, key);
 	if (!btn)
 		return -EINVAL;
@@ -595,7 +619,7 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 	if (unlikely(ind > parent->numkeys || parent->values[ind] != (u64)btn))
 		return -EINVAL;
 
-	bpf_printk("%s:%d", __func__, __LINE__);
+	bpf_printk("%s:%d Removing %p", __func__, __LINE__, btn);
 	ret = btnode_remove_internal(parent, ind);
 	if (unlikely(ret))
 		return ret;
@@ -604,6 +628,7 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 
 	btn = parent;
 
+	merging = true;
 	while (!btnode_isroot(btn) && btn->numkeys < BT_LEAFSZ / 2 && can_loop) {
 		parent = btn->parent;
 
@@ -620,11 +645,11 @@ int bt_remove(btree_t __arg_arena *btree, u64 key)
 		btree->root->parent = NULL;
 		btnode_free(btree, btn);
 
-		bpf_printk("AFTER ROOT SWITCH");
-		bt_print(btree);
-
 	}
 
+	bt_print(btree);
+
+	merging = false;
 	return 0;
 }
 
