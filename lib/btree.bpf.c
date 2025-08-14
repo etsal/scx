@@ -106,7 +106,7 @@ u64 bt_create_internal(void)
 
 static bool merging;
 
-__weak
+static
 u64 btn_node_index_by_key(bt_node __arg_arena *btn, u64 key)
 {
 	int i;
