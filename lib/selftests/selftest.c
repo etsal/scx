@@ -252,9 +252,10 @@
 #include <scx/common.h>
 #include <scx/bpf_arena_common.h>
 
+#include "selftest.h"
+
 #include <lib/sdt_task.h>
 
-#include "selftest.h"
 #include "selftest.skel.h"
 
 #define VALIDATE_PERROR(errval, perrstr) do {				\

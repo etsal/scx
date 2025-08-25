@@ -23,3 +23,10 @@ int scx_selftest_lvqueue(void);
 int scx_selftest_minheap(void);
 int scx_selftest_topology(void);
 int scx_selftest_btree(void);
+
+#ifndef __BPF__
+
+/* Dummy "definition" for userspace. */
+#define arena_spinlock_t u64
+
+#endif /* __BPF__ */
