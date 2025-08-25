@@ -243,13 +243,18 @@
 
 #include <stdio.h>
 #include <unistd.h>
+
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
-#include <scx/common.h>
+
 #include <sys/resource.h>
+
+#include <scx/common.h>
+#include <scx/bpf_arena_common.h>
 
 #include <lib/sdt_task.h>
 
+#include "selftest.h"
 #include "selftest.skel.h"
 
 #define VALIDATE_PERROR(errval, perrstr) do {				\

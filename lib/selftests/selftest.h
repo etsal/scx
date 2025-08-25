@@ -9,6 +9,14 @@
 		}			\
 	} while (0)
 
+/* Each scheduler defines their own task_ctx. */
+struct task_ctx_nonarena {
+	u64 pid;
+	u64 vtime;
+};
+
+typedef struct task_ctx_nonarena __arena task_ctx;
+
 int scx_selftest_atq(void);
 int scx_selftest_bitmap(void);
 int scx_selftest_lvqueue(void);
