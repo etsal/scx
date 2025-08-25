@@ -254,6 +254,7 @@
 
 #include "selftest.h"
 
+#include <lib/atq.h>
 #include <lib/sdt_task.h>
 
 #include "selftest.skel.h"
@@ -265,13 +266,13 @@
 	if (perrstr)							\
 		perror(perrstr);					\
 									\
-	fprintf(stderr, "%s:%d (error %d)", __func__, __LINE__, errval); \
+	fprintf(stderr, "%s:%d (error %d)\n", __func__, __LINE__, errval); \
 	exit(0);							\
 } while (0)
 
 #define VALIDATE(errval) VALIDATE_PERROR((errval), NULL)
 
-#define CRASHOUT() do { fprintf(stderr, "%s:%d [fail]", __func__, __LINE__); exit(0); } while (0)
+#define CRASHOUT() do { fprintf(stderr, "%s:%d [fail]\n", __func__, __LINE__); exit(0); } while (0)
 
 int bump_rlimit(void)
 {
@@ -305,7 +306,7 @@ int main(int argc, char *argv[])
 	VALIDATE(ret);
 
 	skel = selftest__open();
-	if (skel)
+	if (!skel)
 		CRASHOUT();
 
 	ret = selftest__load(skel);

@@ -28,5 +28,6 @@ int scx_selftest_btree(void);
 
 /* Dummy "definition" for userspace. */
 #define arena_spinlock_t u64
+#define topo_ptr void *
 
 #endif /* __BPF__ */

@@ -46,3 +46,5 @@ int arena_selftest(void)
 
 	return 0;
 }
+
+char _license[] SEC("license") = "GPL";
