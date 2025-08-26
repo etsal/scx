@@ -595,21 +595,6 @@ impl<'a> Scheduler<'a> {
 
         let types::topo_level(index) = types::topo_level::TOPO_LLC;
 
-        for numa in 0..domains.nr_nodes() {
-            let node_domains = domains.numa_doms(&numa);
-
-            for dom in node_domains.iter() {
-                let ptr = bss_data.topo_nodes[index as usize][dom.id()];
-                let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
-                update_bpf_mask(domc.cpumask, &dom.mask())?;
-
-                bss_data.dom_numa_id_map[dom.id()] =
-                    numa.try_into().expect("NUMA ID could not fit into 32 bits");
-
-                info!(" DOM[{:02}] mask= {}", dom.id(), dom.mask());
-            }
-        }
-
         // Actually get the scheduler starting.
         let struct_ops = Some(scx_ops_attach!(skel, wd40)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;

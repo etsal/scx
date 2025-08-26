@@ -72,15 +72,8 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	if (!domc)
 		return NULL;
 
-	domc->cpumask = scx_bitmap_alloc();
-	if (!domc->cpumask) {
-		lb_domain_free(domc);
-		return NULL;
-	}
-
 	domc->direct_greedy_cpumask = scx_bitmap_alloc();
 	if (!domc->direct_greedy_cpumask) {
-		scx_bitmap_free(domc->cpumask);
 		lb_domain_free(domc);
 		return NULL;
 	}
@@ -88,7 +81,6 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	domc->node_cpumask = scx_bitmap_alloc();
 	if (!domc->node_cpumask) {
 		scx_bitmap_free(domc->direct_greedy_cpumask);
-		scx_bitmap_free(domc->cpumask);
 		lb_domain_free(domc);
 		return NULL;
 	}
@@ -103,7 +95,6 @@ void lb_domain_free(dom_ptr domc)
 
 	scx_bitmap_free(domc->node_cpumask);
 	scx_bitmap_free(domc->direct_greedy_cpumask);
-	scx_bitmap_free(domc->cpumask);
 
 	scx_stk_free(&lb_domain_allocator, (void __arena *)domc);
 }

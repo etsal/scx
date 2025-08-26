@@ -123,7 +123,7 @@ static u32 task_pick_domain(task_ptr taskc, struct task_struct *p,
 			continue;
 		}
 
-		if (scx_bitmap_intersects_cpumask(domc->cpumask, cpumask)) {
+		if (scx_bitmap_intersects_cpumask(domc->topo->mask, cpumask)) {
 			taskc->dom_mask |= 1LLU << dom;
 			/*
 			 * The starting point is round-robin'd and the first
@@ -174,7 +174,7 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (scx_bitmap_intersects_cpumask(new_domc->cpumask, p->cpus_ptr)) {
+	if (scx_bitmap_intersects_cpumask(new_domc->topo->mask, p->cpus_ptr)) {
 		u64 now = scx_bpf_now();
 
 		if (!init_dsq_vtime)
@@ -185,7 +185,7 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		init_vtime(p, taskc);
-		scx_bitmap_and_cpumask(t_cpumask, new_domc->cpumask, p->cpus_ptr);
+		scx_bitmap_and_cpumask(t_cpumask, new_domc->topo->mask, p->cpus_ptr);
 	}
 
 	bpf_rcu_read_unlock();

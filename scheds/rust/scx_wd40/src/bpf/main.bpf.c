@@ -152,7 +152,7 @@ static s32 try_sync_wakeup(struct task_struct *p, task_ptr taskc,
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	share_llc = scx_bitmap_test_cpu(prev_cpu, domc->cpumask);
+	share_llc = scx_bitmap_test_cpu(prev_cpu, domc->topo->mask);
 	if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		stat_add(RUSTY_STAT_SYNC_PREV_IDLE, 1);
 
@@ -160,7 +160,7 @@ static s32 try_sync_wakeup(struct task_struct *p, task_ptr taskc,
 		goto out;
 	}
 
-	has_idle = scx_bitmap_intersects_cpumask(domc->cpumask, idle_cpumask);
+	has_idle = scx_bitmap_intersects_cpumask(domc->topo->mask, idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    !(current->flags & PF_EXITING) && taskc->target_dom < MAX_DOMS &&
@@ -798,7 +798,7 @@ static s32 initialize_cpu(s32 cpu)
 		if (!domc)
 			return -ENOENT;
 
-		if (scx_bitmap_test_cpu(cpu, domc->cpumask)) {
+		if (scx_bitmap_test_cpu(cpu, domc->topo->mask)) {
 			pcpuc->domc = domc;
 			return 0;
 		}
