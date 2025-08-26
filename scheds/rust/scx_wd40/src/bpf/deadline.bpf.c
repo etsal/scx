@@ -10,6 +10,7 @@
 #include <lib/sdt_task.h>
 
 #include <lib/cpumask.h>
+#include <lib/topology.h>
 
 #include <scx/bpf_arena_common.bpf.h>
 #include <scx/bpf_arena_spin_lock.h>

@@ -116,16 +116,9 @@ static inline u32 cpu_to_dom_id(u32 cpu)
 	topo_ptr topo;
 	u32 id;
 
-	if (cpu >= NR_CPUS) {
-		scx_bpf_error("invalid CPU ID");
+	topo = topo_find_descendant(topo_all, cpu);
+	if (!topo)
 		return MAX_DOMS;
-	}
-
-	topo = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
-	if (!topo) {
-		scx_bpf_error("cpu is offline");
-		return MAX_DOMS;
-	}
 
 	id = topo->parent->parent->id;
 	if (id >= MAX_DOMS) {
@@ -137,7 +130,8 @@ static inline u32 cpu_to_dom_id(u32 cpu)
 
 static inline bool is_offline_cpu(s32 cpu)
 {
-	return topo_nodes[TOPO_CPU] == NULL;
+
+	return(topo_find_descendant(topo_all, cpu) == NULL);
 }
 
 static s32 try_sync_wakeup(struct task_struct *p, task_ptr taskc,
