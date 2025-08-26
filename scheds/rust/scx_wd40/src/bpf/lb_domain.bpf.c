@@ -36,8 +36,6 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
-
 struct scx_stk lb_domain_allocator;
 
 /*
@@ -338,7 +336,7 @@ s32 create_dom(u32 dom_id)
 	}
 
 	domc = lookup_dom_ctx(dom_id);
-	domc->node_cpumask = node_data[node_id];
+	domc->node_cpumask = domc->topo->mask;
 
 	return 0;
 }

@@ -596,18 +596,9 @@ impl<'a> Scheduler<'a> {
         let types::topo_level(index) = types::topo_level::TOPO_LLC;
 
         for numa in 0..domains.nr_nodes() {
-            let mut numa_mask = Cpumask::new();
             let node_domains = domains.numa_doms(&numa);
-            for dom in node_domains.iter() {
-                let dom_mask = dom.mask();
-                numa_mask = numa_mask.or(&dom_mask);
-            }
-
-            update_bpf_mask(bss_data.node_data[numa], &numa_mask)?;
-            info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
-                // XXX Remove this by using the topo node's cpumask.
                 let ptr = bss_data.topo_nodes[index as usize][dom.id()];
                 let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
                 update_bpf_mask(domc.cpumask, &dom.mask())?;

@@ -833,12 +833,6 @@ int wd40_setup(void)
 		return -ENOENT;
 	}
 
-	bpf_for(i, 0, nr_nodes) {
-		ret = create_save_scx_bitmap((scx_bitmap_t *)&node_data[i]);
-		if (ret)
-			return ret;
-	}
-
 	bpf_for(i, 0, nr_doms) {
 		ret = alloc_dom(i);
 		if (ret)
