@@ -37340,7 +37340,7 @@ struct acpi_control_state {
 };
 
 struct cpumask {
-	long unsigned int bits[128];
+	long unsigned int bits[1];
 };
 
 typedef struct cpumask cpumask_var_t[1];

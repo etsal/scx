@@ -38,26 +38,11 @@ struct {
 
 struct scx_stk lb_domain_allocator;
 
-/*
- * Declared in its own section because loading the object otherwise fails
- * with the following error message (where bpf_bpf the fully linked object):
- *
- * [WARN] libbpf: map 'bpf_bpf.bss': failed to re-mmap() contents: -524
- * [WARN] libbpf: map 'bpf_bpf.bss': failed to create: unknown error (-524)(-524)
- * [WARN] libbpf: failed to load object 'bpf_bpf'
- */
-private(LBDOMAIN_BUDDY) struct scx_buddy buddy;
-
 #define LBALLOC_PAGES_PER_ALLOC (16)
 
 __weak
 int lb_domain_init(void)
 {
-	if (scx_buddy_init(&buddy, PAGE_SIZE)) {
-		scx_bpf_error("failed to initialize buddy allocator");
-		bpf_printk("failed to initialize buddy allocator");
-	}
-
 	return scx_stk_init(&lb_domain_allocator,
 		sizeof(struct dom_ctx),
 		LBALLOC_PAGES_PER_ALLOC);
@@ -286,7 +271,9 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 
 __weak s32 alloc_dom(u32 dom_id)
 {
+	struct topo_iter iter;
 	dom_ptr domc;
+	topo_ptr topo;
 
 	if (dom_id >= MAX_DOMS) {
 		scx_bpf_error("Max dom ID %u exceeded (%u)", MAX_DOMS, dom_id);
@@ -297,12 +284,27 @@ __weak s32 alloc_dom(u32 dom_id)
 	if (!domc)
 		return -ENOMEM;
 
+	domc->topo = NULL;
+	TOPO_FOR_EACH_LLC(&iter, topo) {
+		bpf_printk("topo %p %d", topo, topo->id);
+		if (topo->id == dom_id)
+			continue;
+
+		domc->topo = topo;
+		break;
+	}
+
+	if (!domc->topo) {
+		bpf_printk("No topology node for domain %d", dom_id);
+		return -ENOENT;
+	}
+
 	topo_nodes[TOPO_LLC][dom_id] = (u64)domc;
 
 	return 0;
 }
 
-__hidden
+__weak
 s32 create_dom(u32 dom_id)
 {
 	dom_ptr domc;
@@ -327,7 +329,7 @@ s32 create_dom(u32 dom_id)
 	}
 
 	domc = lookup_dom_ctx(dom_id);
-	domc->node_cpumask = domc->topo->mask;
+	domc->node_cpumask = domc->topo->parent->mask;
 
 	return 0;
 }

@@ -798,6 +798,8 @@ static s32 initialize_cpu(s32 cpu)
 		if (!domc)
 			return -ENOENT;
 
+		bpf_printk("%p", domc);
+
 		if (scx_bitmap_test_cpu(cpu, domc->topo->mask)) {
 			pcpuc->domc = domc;
 			return 0;
