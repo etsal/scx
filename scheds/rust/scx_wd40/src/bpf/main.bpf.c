@@ -107,7 +107,6 @@ static void task_load_adj(task_ptr taskc, u64 now, bool runnable)
 	taskc->dcyc_rd = rdp;
 }
 
-scx_bitmap_t all_cpumask;
 scx_bitmap_t direct_greedy_cpumask;
 scx_bitmap_t kick_greedy_cpumask;
 
@@ -728,8 +727,7 @@ void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p __arg_trusted,
 		return;
 
 	task_pick_and_set_domain(taskc, p, cpumask, false);
-	if (all_cpumask)
-		taskc->all_cpus = scx_bitmap_subset_cpumask(all_cpumask, cpumask);
+	taskc->all_cpus = scx_bitmap_subset_cpumask(topo_all->mask, cpumask);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted,
@@ -816,10 +814,6 @@ int wd40_setup(void)
 {
 	int ret, i;
 
-	ret = create_save_scx_bitmap(&all_cpumask);
-	if (ret)
-		return ret;
-
 	ret = create_save_scx_bitmap(&direct_greedy_cpumask);
 	if (ret)
 		return ret;
@@ -869,8 +863,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 			return ret;
 
 	}
-
-	scx_bitmap_or(all_cpumask, all_cpumask, topo_all->mask);
 
 	bpf_for(i, 0, nr_cpu_ids) {
 
