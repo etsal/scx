@@ -154,19 +154,19 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 }
 
 __weak
-topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
+u64 topo_find_descendant_internal(topo_ptr __arg_arena topo, u32 cpu)
 {
 	topo_ptr child;
 	int lvl, i;
 
 	if (!topo_contains(topo, cpu)) {
 		bpf_printk("missing cpu from topology");
-		return NULL;
+		return (u64)NULL;
 	}
 
 	for (lvl = 0; lvl < TOPO_MAX_LEVEL && can_loop; lvl++) {
 		if (topo->nr_children == 0)
-			return topo;
+			return (u64)topo;
 
 		for (i = 0; i < topo->nr_children && can_loop; i++) {
 			child = topo->children[i];
@@ -176,13 +176,13 @@ topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 
 		if (i == topo->nr_children) {
 			bpf_printk("missing cpu from inner topology nodes");
-			return NULL;
+			return (u64)NULL;
 		}
 
 		topo = child;
 	}
 
-	return topo;
+	return (u64)topo;
 }
 
 __weak
