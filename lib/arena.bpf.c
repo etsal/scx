@@ -50,6 +50,12 @@ int arena_init(struct arena_init_args *args)
 		return ret;
 	}
 
+	ret = scx_malloc_init();
+	if (ret) {
+		bpf_printk("scx_malloc_init failed with %d", ret);
+		return ret;
+	}
+
 	return 0;
 }
 
