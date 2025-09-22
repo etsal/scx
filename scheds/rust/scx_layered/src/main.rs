@@ -985,6 +985,7 @@ impl Stats {
             }
         }
 
+        println!("{:?}", layer_membw_agg);
         layer_membw_agg
     }
 
@@ -1089,6 +1090,20 @@ impl Stats {
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
 
+        // Memory BW normalization. It requires finding the delta according to perf, the delta 
+        // according to resctl, and finding the factor between them. This also helps in 
+        // determining whether this delta is stable. 
+        //
+        // We scale only the raw PMC delta - the part of the counter incremented between two
+        // periods. This is because the scaling factor is only valid for that time period.
+        // Non-scaled samples are not comparable, while scaled ones are.
+        let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
+        let pmu_cur: u64 = cur_layer_membw_agg.iter().map(|x| x.iter().sum::<u64>()).sum();
+        println!("{:?}", cur_layer_membw_agg);
+        println!("{}, {}", pmu_cur as f64 / 1024.0_f64.powf(3.0), pmu_prev as f64 / 1024.0_f64.powf(3.0));
+        let resctrl_cur = Self::resctrl_read_total_membw()?;
+        let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
+
         // Computes the runtime deltas and converts them from ns to s.
         let compute_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
@@ -1121,19 +1136,12 @@ impl Stats {
         let cur_layer_utils: Vec<Vec<f64>> =
             compute_diff(&cur_layer_usages, &self.prev_layer_usages);
 
-        // Memory BW normalization. It requires finding the delta according to perf, the delta 
-        // according to resctl, and finding the factor between them. This also helps in 
-        // determining whether this delta is stable. We then go into each value we've 
-        // computed and adjust by (resctl/perf).
-        let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
-        let pmu_cur: u64 = cur_layer_membw_agg.iter().map(|x| x.iter().sum::<u64>()).sum();
-        let resctrl_cur = Self::resctrl_read_total_membw()?;
-        let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
-
-        let cur_layer_membw_agg = cur_layer_membw_agg.iter().map(|x| x.iter().map(|x| (*x as f64 * factor) as u64 ).collect()).collect();
-
+        // Scale the raw value delta by the resctrl/pmc computed factor.
         let cur_layer_membw: Vec<Vec<f64>> =
             compute_mem_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
+
+        let cur_layer_membw: Vec<Vec<f64>> = cur_layer_membw.iter().map(|x| x.iter().map(|x| *x * factor).collect()).collect();
+        println!("{:?}", cur_layer_membw);
 
         let metric_decay =
             |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>, decay_rate: f64| {
@@ -1152,9 +1160,9 @@ impl Stats {
                     .collect()
             };
 
-        let perf_diff = cur_layer_membw.iter().map(|x| x.iter().sum::<f64>()).sum::<f64>().round() as i64;
-        let resctrl_diff = ((pmu_cur - pmu_prev) as f64 / (1024 as f64).powf(3.0)).round() as i64;
-        println!("P {}\t R {}\t D {}\t RATIO {}", perf_diff, resctrl_diff, resctrl_diff - perf_diff, resctrl_diff as f64 / perf_diff as f64);
+        let perf_diff = ((pmu_cur - pmu_prev) as f64 / (1024 as f64).powf(3.0)).round() as i64;
+        let resctrl_diff = ((resctrl_cur - resctrl_prev) as f64 / (1024 as f64).powf(3.0)).round() as i64;
+        println!("P {}\t R {}\t RATIO {} FACTOR {}", perf_diff, resctrl_diff, resctrl_diff as f64 / perf_diff as f64, factor);
 
         let layer_utils: Vec<Vec<f64>> =
             metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
