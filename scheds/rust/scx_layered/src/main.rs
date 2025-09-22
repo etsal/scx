@@ -75,6 +75,7 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use walkdir::WalkDir;
 
 const SCHEDULER_NAME: &str = "scx_layered";
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
@@ -943,6 +944,7 @@ struct Stats {
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
+    prev_pmu_resctrl_membw: (u64, u64), // (PMU-reported membw, resctrl-reported membw)
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
@@ -978,13 +980,34 @@ impl Stats {
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
-                    let delta = cpu_ctxs[cpu].layer_membw_agg[layer][usage];
-                    layer_membw_agg[layer][usage] += delta;
+                    layer_membw_agg[layer][usage] = cpu_ctxs[cpu].layer_membw_agg[layer][usage];
                 }
             }
         }
 
         layer_membw_agg
+    }
+
+    /// Use the membw reported by resctrl to normalize the values reported by hw counters.
+    /// We have the following problem:
+    /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
+    /// less transparently, since we would require different RMID for each task.
+    /// 2) We want to directly use perf counters for tracking per-task memory bandwidth, but
+    /// we can't: Non-resctrl counters do not measure the right thing (e.g., they only measure
+    /// proxies like load operations),
+    /// 3) Resctrl counters are not accessible directly so we cannot read them from the BPF side.
+    ///
+    /// Approximate per-task memory bandwidth using perf counters to measure _relative_ memory
+    /// bandwidth usage.
+    fn resctrl_read_total_membw() -> Result<u64> {
+        let mut total_membw = 0u64;
+        for entry in WalkDir::new("/sys/fs/resctrl/mon_data").min_depth(1).into_iter().filter_map(Result::ok).filter(|x| x.path().is_dir()) {
+            let mut path = entry.path().to_path_buf();
+            path.push("mbm_total_bytes");
+            total_membw += fs::read_to_string(path)?.trim().parse::<u64>()?;
+        }
+
+        Ok(total_membw)
     }
 
     fn new(
@@ -996,6 +1019,7 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
+        let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
@@ -1008,7 +1032,11 @@ impl Stats {
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
-            prev_layer_membw_agg: Self::read_layer_membw_agg(&cpu_ctxs, nr_layers),
+            // This is not normalized because we don't have enough history to do so.
+            // It should not matter too much, since the value is dropped on the first
+            // iteration.
+            prev_layer_membw_agg: pmu_membw,
+            prev_pmu_resctrl_membw: (0, 0),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
@@ -1075,8 +1103,8 @@ impl Stats {
                 .collect()
         };
 
-        // Computes the total memory traffic done since last computation and normalizes to GB/s
-        // over the elapsed timescale.
+        // Computes the total memory traffic done since last computation and normalizes to GBs.
+        // We derive the rate of consumption elsewhere.
         let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
                 .iter()
@@ -1084,7 +1112,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| ((c - p) as f64 / (1024 as f64).powf(3.0)) / elapsed_f64)
+                        .map(|(c, p)| ((*c as i64 - *p as i64) as f64 / (1024 as f64).powf(3.0)))
                         .collect()
                 })
                 .collect()
@@ -1092,6 +1120,18 @@ impl Stats {
 
         let cur_layer_utils: Vec<Vec<f64>> =
             compute_diff(&cur_layer_usages, &self.prev_layer_usages);
+
+        // Memory BW normalization. It requires finding the delta according to perf, the delta 
+        // according to resctl, and finding the factor between them. This also helps in 
+        // determining whether this delta is stable. We then go into each value we've 
+        // computed and adjust by (resctl/perf).
+        let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
+        let pmu_cur: u64 = cur_layer_membw_agg.iter().map(|x| x.iter().sum::<u64>()).sum();
+        let resctrl_cur = Self::resctrl_read_total_membw()?;
+        let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
+
+        let cur_layer_membw_agg = cur_layer_membw_agg.iter().map(|x| x.iter().map(|x| (*x as f64 * factor) as u64 ).collect()).collect();
+
         let cur_layer_membw: Vec<Vec<f64>> =
             compute_mem_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
 
@@ -1112,11 +1152,13 @@ impl Stats {
                     .collect()
             };
 
+        let perf_diff = cur_layer_membw.iter().map(|x| x.iter().sum::<f64>()).sum::<f64>().round() as i64;
+        let resctrl_diff = ((pmu_cur - pmu_prev) as f64 / (1024 as f64).powf(3.0)).round() as i64;
+        println!("P {}\t R {}\t D {}\t RATIO {}", perf_diff, resctrl_diff, resctrl_diff - perf_diff, resctrl_diff as f64 / perf_diff as f64);
+
         let layer_utils: Vec<Vec<f64>> =
             metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
-        println!("Bandwidth vector {:?}", cur_layer_membw);
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
-        println!("Total {:?}", layer_membws.iter().map(|x| x.iter().map(|&y| y as f64).sum::<f64>()).collect::<Vec<f64>>());
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
@@ -1143,6 +1185,8 @@ impl Stats {
             layer_membws,
             prev_layer_usages: cur_layer_usages,
             prev_layer_membw_agg: cur_layer_membw_agg,
+            // Was updated during normalization.
+            prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
@@ -2250,7 +2294,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
         // No memory BW tracking by default
-        skel.progs.scx_pmu_tc.set_autoload(membw_tracking);
+        skel.progs.scx_pmu_switch_tc.set_autoload(membw_tracking);
+        skel.progs.scx_pmu_tick_tc.set_autoload(membw_tracking);
 
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
@@ -2663,10 +2708,8 @@ impl<'a> Scheduler<'a> {
                     };
 
                     trace!(
-                        "(membw, membw_limit): ({membw} gi_b, {membw_limit} gi_b)"
-                    );
-
-                    println!("{} Getting {}gi_b, Limit is {}gi_b", layer.name, membw, membw_limit);
+                        "layer {0} (membw, membw_limit): ({membw} gi_b, {membw_limit} gi_b)"
+                    , layer.name);
 
                     if membw_limit > 0.0 {
                         high = self.clamp_target_by_membw(
@@ -3559,7 +3602,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
         | "cascadelakex" | "arrowlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
         | "graniterapids" => {
             trace!("found Intel codename {codename}");
-            pmumanager.pmus.get("MEM_LOAD_RETIRED.L3_MISS")
+            pmumanager.pmus.get("LONGEST_LAT_CACHE.MISS")
         }
 
         _ => {
