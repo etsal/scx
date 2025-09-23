@@ -112,6 +112,7 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 		if (ret)
 			return ret;
 
+		/* Update an existing running counter. */
 		if (update)
 			cntrs->agg[idx] += value.counter - cntrs->start[idx];
 
@@ -284,9 +285,8 @@ int scx_pmu_tick_tc(u64 *ctx)
 	if (!p)
 		return 0;
 
-	if (!p->pid) {
+	if (!p->pid)
 		return 0;
-	}
 
 	/* Tracepoints not allowed to return errors. */
 	scx_pmu_event_start(p, true);
