@@ -1100,7 +1100,7 @@ impl Stats {
         let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
         let pmu_cur: u64 = cur_layer_membw_agg.iter().map(|x| x.iter().sum::<u64>()).sum();
         println!("{:?}", cur_layer_membw_agg);
-        println!("{}, {}", pmu_cur as f64 / 1024.0_f64.powf(3.0), pmu_prev as f64 / 1024.0_f64.powf(3.0));
+        println!("cur {}", (pmu_cur - pmu_prev) as f64 / 1024.0_f64.powf(3.0));
         let resctrl_cur = Self::resctrl_read_total_membw()?;
         let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
 
@@ -2720,6 +2720,7 @@ impl<'a> Scheduler<'a> {
                     , layer.name);
 
                     if membw_limit > 0.0 {
+                        // XXXETSAL Fix
                         high = self.clamp_target_by_membw(
                             &layer,
                             membw_limit as f64,
@@ -3621,6 +3622,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
 
     let spec = pmuspec.ok_or("not_found").unwrap();
     let config = (spec.umask << 8) | spec.event[0];
+    println!("Dumping config {:x}", config);
 
     // Install the counter in the BPF map
     skel.maps.rodata_data.as_mut().unwrap().membw_event = config;
