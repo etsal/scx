@@ -1763,9 +1763,11 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 	u64 used;
 	u64 bytes;
 
-	/* Try to get the memory bandwdith, actively ignore the error if we fail. */
-	if (scx_pmu_read(p, membw_event, &bytes, true))
+	/* Try to get the memory bandwidth, actively ignore the error if we fail. */
+	if (scx_pmu_read(p, membw_event, &bytes, true)) {
+		bpf_printk("FAILED TO READ");
 		bytes = 0;
+	}
 	bytes *= 64;
 
 	used = now - cpuc->used_at;

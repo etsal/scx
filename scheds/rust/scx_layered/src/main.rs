@@ -980,7 +980,7 @@ impl Stats {
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
-                    layer_membw_agg[layer][usage] = cpu_ctxs[cpu].layer_membw_agg[layer][usage];
+                    layer_membw_agg[layer][usage] += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
                 }
             }
         }
@@ -1100,7 +1100,7 @@ impl Stats {
         let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
         let pmu_cur: u64 = cur_layer_membw_agg.iter().map(|x| x.iter().sum::<u64>()).sum();
         println!("{:?}", cur_layer_membw_agg);
-        println!("cur {}", (pmu_cur - pmu_prev) as f64 / 1024.0_f64.powf(3.0));
+        println!("cur {}GiB", (pmu_cur - pmu_prev) as f64 / 1024.0_f64.powf(3.0));
         let resctrl_cur = Self::resctrl_read_total_membw()?;
         let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
 
@@ -2329,6 +2329,7 @@ impl<'a> Scheduler<'a> {
         let event = if membw_tracking {
             setup_membw_tracking(&mut skel)?
         } else {
+            println!("NO MEMBW TRACKING");
             0
         };
 
@@ -3549,6 +3550,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
     attr.type_ = perf::bindings::PERF_TYPE_RAW;
     attr.config = event;
     attr.sample_type = 0u64;
+    attr.__bindgen_anon_1.sample_period = 0u64;
     attr.set_disabled(0);
 
     let perf_events_map = &skel.maps.scx_pmu_map;
@@ -3560,7 +3562,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
         let fd = unsafe { perf::perf_event_open(&mut attr as *mut _, -1, cpu as i32, -1, 0) };
         if fd < 0 {
             failures += 1;
-            trace!(
+            println!(
                 "perf_event_open failed cpu={cpu} errno={}",
                 std::io::Error::last_os_error()
             );
@@ -3578,14 +3580,14 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
             )
         };
         if ret != 0 {
-            trace!("bpf_map_update_elem failed cpu={cpu} fd={fd} ret={ret}");
+            println!("bpf_map_update_elem failed cpu={cpu} fd={fd} ret={ret}");
         } else {
             trace!("mapped cpu={cpu} -> fd={fd}");
         }
     }
 
     if failures > 0 {
-        trace!("failed to install {failures} counters");
+        println!("failed to install {failures} counters");
         // Keep going, do not fail the scheduler for this
     }
 
@@ -3621,6 +3623,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     };
 
     let spec = pmuspec.ok_or("not_found").unwrap();
+    println!("{:?}", pmuspec);
     let config = (spec.umask << 8) | spec.event[0];
     println!("Dumping config {:x}", config);
 

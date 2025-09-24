@@ -28,6 +28,7 @@ struct scx_pmu_counters {
 	u64 start[SCX_MAX_PMU_COUNTERS];
 	u64 agg[SCX_MAX_PMU_COUNTERS];
 	bool switched;
+	u64 timestamp;
 	u32 gen;
 };
 
@@ -64,14 +65,18 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 		 * We updated the counters we were using. Invalidate
 		 * previous measurements.
 		 */
+		/*
 		if (unlikely(cntrs->gen != scx_pmu_gen)) {
 			cntrs->agg[idx] = 0;
 			continue;
 		}
+		*/
 
 		ret = bpf_perf_event_read_value(&scx_pmu_map, BPF_F_CURRENT_CPU, &value, sizeof(value));
-		if (ret)
+		if (ret) {
+			bpf_printk("read failed");
 			return ret;
+		}
 
 		if (unlikely(!cntrs->switched && value.enabled != value.running)) {
 			bpf_printk("SWITCHED: %ld vs %ld", value.enabled, value.running);
@@ -79,6 +84,8 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 		}
 
 		/* Add the delta for this scheduling interval. */
+		if (p->comm[0] == 'a' && p->comm[1] == 's' && p->comm[2] == 'd' && p->comm[3] == 'f')
+			bpf_printk("Delta %ld (%ld ns)", value.counter - cntrs->start[idx], scx_bpf_now() - cntrs->timestamp);
 		cntrs->agg[idx] += value.counter - cntrs->start[idx];
 
 	}
@@ -105,19 +112,26 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 			continue;
 
 		/* If we modified the installed counters invalidate and continue. */
+		/*
 		if (unlikely(cntrs->gen != scx_pmu_gen))
 			cntrs->agg[idx] = 0;
+			*/
 
 		ret = bpf_perf_event_read_value(&scx_pmu_map, BPF_F_CURRENT_CPU, &value, sizeof(value));
 		if (ret)
 			return ret;
 
 		/* Update an existing running counter. */
-		if (update)
+		if (update) {
 			cntrs->agg[idx] += value.counter - cntrs->start[idx];
+			/* Add the delta for this scheduling interval. */
+			if (p->comm[0] == 'a' && p->comm[1] == 's' && p->comm[2] == 'd' && p->comm[3] == 'f')
+				bpf_printk("Delta %ld (%ld ns)", value.counter - cntrs->start[idx], scx_bpf_now() - cntrs->timestamp);
+		}
 
 		/* Add the delta for this scheduling interval. */
 		cntrs->start[idx] = value.counter;
+		cntrs->timestamp = scx_bpf_now();
 
 	}
 
@@ -236,14 +250,20 @@ int scx_pmu_read(struct task_struct __arg_trusted *p, u64 event, u64 *value, boo
 		return -EINVAL;
 
 	cntrs = bpf_task_storage_get(&scx_pmu_tasks, p, 0, 0);
-	if (!cntrs)
+	if (!cntrs) {
+		bpf_printk("NO COUNTERS");
 		return -ENOENT;
+	}
 
-	if (unlikely(!value))
+	if (unlikely(!value)) {
+		bpf_printk("NO VALUE");
 		return -EINVAL;
+	}
 
-	if (unlikely(idx < 0 || idx >= SCX_MAX_PMU_COUNTERS))
+	if (unlikely(idx < 0 || idx >= SCX_MAX_PMU_COUNTERS)) {
+		bpf_printk("INVALID INDEX");
 		return -EINVAL;
+	}
 
 	*value = cntrs->agg[idx];
 
@@ -262,16 +282,20 @@ int scx_pmu_switch_tc(u64 *ctx)
 	prev = (struct task_struct *)ctx[1];
 	next = (struct task_struct *)ctx[2];
 
+	/*
 	if (!prev->pid)
 		goto next;
+		*/
 
 	ret = scx_pmu_event_stop(prev);
 	if (ret)
 		return ret;
 
 next:
+	/*
 	if (!next->pid)
 		return 0;
+		*/
 
 	return scx_pmu_event_start(next, false);
 }
@@ -285,8 +309,10 @@ int scx_pmu_tick_tc(u64 *ctx)
 	if (!p)
 		return 0;
 
+	/*
 	if (!p->pid)
 		return 0;
+		*/
 
 	/* Tracepoints not allowed to return errors. */
 	scx_pmu_event_start(p, true);
