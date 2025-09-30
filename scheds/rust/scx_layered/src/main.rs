@@ -3232,6 +3232,8 @@ impl<'a> Scheduler<'a> {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,
             }
+
+            break;
         }
 
         let _ = self.struct_ops.take();
@@ -3756,9 +3758,7 @@ fn main() -> Result<()> {
             &hint_to_layer_map,
             membw_required,
         )?;
-        if !sched.run(shutdown.clone())?.should_restart() {
-            break;
-        }
+        let _ = sched.run(shutdown.clone())?;
     }
 
     Ok(())
