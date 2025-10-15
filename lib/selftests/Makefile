@@ -5,8 +5,13 @@ BPFTOOL=bpftool
 
 INCLUDES=-I../../scheds/include -I../../scheds/include/arch -I ../../scheds/include/arch/bpf-compat
 
-BPF_CFLAGS=-O2 -g -target bpf -D__TARGET_ARCH_x86 -mcpu=v3 -Wall
-BPF_CFLAGS+=-I/usr/include/bpf -I/usr/include/$(shell uname -m)-linux-gnu 
+BPF_CFLAGS=--target=bpf -g -O2 -Wall -Wno-compare-distinct-pointer-types -D__TARGET_ARCH_x86 -mcpu=v3 -mlittle-endian -c
+BPF_ASAN_FLAGS=-fsanitize=address -shared-libasan -fno-sanitize-link-runtime 
+BPF_LLVM_FLAGS=-mllvm -asan-instrument-address-spaces=1 -mllvm -asan-use-stack-safety=0 -mllvm -asan-stack=0 -mllvm -asan-kernel=1
+
+BPF_FLAGS=$(BPF_CFLAGS) $(BPF_ASAN_FLAGS) $(BPF_LLVM_FLAGS)
+
+BPF_CFLAGS+=-I../../scheds/vmlinux -I/usr/include/bpf -I/usr/include/$(shell uname -m)-linux-gnu 
 BPF_CFLAGS+=$(INCLUDES)
 
 CFLAGS=-O2 -lbpf -lelf -lz -lzstd
@@ -25,13 +30,13 @@ main.bpf.o: $(BPF_OBJECTS)
 	$(BPFTOOL) gen object $@ $^
 
 selftest.bpf.o: selftest.bpf.c
-	clang $(BPF_CFLAGS) -c $< -o $@
+	clang $(BPF_FLAGS) -c $< -o $@
 
 st_%.bpf.o: st_%.bpf.c
-	clang $(BPF_CFLAGS) -c $< -o $@
+	clang $(BPF_FLAGS) -c $< -o $@
 
 %.bpf.o: ../%.bpf.c
-	clang $(BPF_CFLAGS) -c $< -o $@
+	clang $(BPF_FLAGS) -c $< -o $@
 		
 clean:
 	rm -f *.skel.h *.bpf.o
