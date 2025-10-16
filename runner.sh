@@ -1,11 +1,6 @@
 #!/bin/bash
 
-/scx/target/debug/scx_layered --run-example 2>&1 & 
+sysctl kernel.panic_on_warn=1
 
-while true;
-do
-	stress-ng --epoll=24 &
-	sleep 1
-	pkill stress-ng
-	sleep 1
-done
+/scx/target/debug/scx_layered --run-example 2>&1 & 
+stress-ng --tlb-shootdown=40 --epoll=44 &
