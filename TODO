@@ -35,12 +35,12 @@ For each feature we implement the basic KASAN mechanism, then we
 integrate it with the allocator. We then write test cases that 
 exercise the allocator. We define features in terms of KASAN's
 public functions, exported or not, and implement the same or
-equivalent functionatlity in AASAN.
+equivalent functionality in AASAN.
 
 Items tagged with [M] for mechanism, [A] for allocator features,
 and [T] for testing. [C] is for compiler features, with only
 two instances - one for heap memory and one for global objects.
-We limit ourselves to heap memory for now We deal with global
+We limit ourselves to heap memory for now. We deal with global
 objects last, if at all.
 
 Some observations:
@@ -78,6 +78,7 @@ during development
 [M] ASAN intrinsics [generic.c]
 [M] kasan_poison
 [M] kasan_poison_last_granule
+
 [M] kasan_unpoison
 
 [M] __kasan_poison_pages
@@ -99,31 +100,46 @@ and free certain addresses
 	- Allocate with a set memory gap between allocations
 		- Has to be a multiple of GRANULE
 
-
 Alloc/Free Tracking
 -------------------
-[M] kasan_get_alloc_meta	
-[M] kasan_get_free_meta
+
+[M] kasan_set_track
+
 [M] kasan_save_alloc_info
 [M] kasan_save_free_info
+
+[M] kasan_get_alloc_meta	
+[M] kasan_get_free_meta
+
+[A] Store allocation and freeing info for allocations 
+
+[T] More testing
 
 Reporting
 ---------
 
-[M] kasan_enable_current  [Critical sections/Nesting]
-[M] kasan_report
 [M] kasan_disable_current [Critical sections/Nesting]
-[M] __asan_report_*() intrinsics
-[M] kasan_find_first_bad_addr
+[M] kasan_enable_current  [Critical sections/Nesting]
+
+[T] Add tests with controlled invalid accesses
+
+[A] Add a prototype object allocator
 [M] kasan_get_alloc_size
-[M] kasan_complete_mode_report_info
-[M] kasan_metadata_fetch_row
-[M] kasan_print_aux_stacks
-[M] kasan_print_address_stack_frame
+
+[T] Ensure kasan_get_alloc_size works with different sizes
+
 [M] kasan_non_canonical_hook
-[M] kasan_save_stack
-[M] kasan_set_track
-[M] kasan_save_trace
+
+[M] print_memory_metadata -> kasan_metadata_fetch_row
+[M] kasan_print_address_stack_frame
+
+[M] kasan_find_first_bad_addr
+[M] kasan_complete_mode_report_info
+[M] kasan_report
+[M] __asan_report_*() intrinsics
+
+[T] Add extra calls (noinline) and ensure the alloc info
+is accurate
 
 Redzoning
 ---------
@@ -142,6 +158,11 @@ Invalid Allocs/Frees
 [M] __kasan_kfree	[EXPAND]
 [M] __kasan_kfree_large [EXPAND]
 
+[A] Add double-free test to the allocator
+[T] Double frees test should return the specific error
+[T] Use-after-free (UAF) test should return that it is UAF 
+instead of generic error
+
 Quarantining
 ------------
 
@@ -151,12 +172,20 @@ Quarantining
 [M] kasan_cache_shrink
 [M] kasan_cache_shutdown
 
+[T] Add testing with allocating/freeing in quick
+succession (base allocator)
+[T] Same testing, but with the object allocator
+
 Global objects
 --------------
 
 [C] Compiler support/options to instrument in AddressSanitizer.cpp
 [M] __asan_register_globals
 [M] __asan_unregister_globals
+
+(NOTE: How is global arena data allocated?)
+
+[T] Add redzone testing for globals of different sizes
 
 Not Strictly Necessary
 ----------------------
