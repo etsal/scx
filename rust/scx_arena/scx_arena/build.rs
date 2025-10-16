@@ -7,6 +7,7 @@ fn main() {
     scx_utils::BpfBuilder::new()
         .unwrap()
         .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .add_source("src/bpf/lib/asan.bpf.c")
         .add_source("src/bpf/lib/arena.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
         .add_source("src/bpf/lib/bitmap.bpf.c")
