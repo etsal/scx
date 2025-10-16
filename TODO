@@ -21,33 +21,6 @@ We need analogues for all the code in mm/kasan:
   depot to store everything)
 - shadow.c: Management of the shadow backing code, based on vmalloc
 
-Functions to implement:
-- common.c
-	- kasan_save_stack
-	- kasan_set_track
-	- kasan_save_trace
-
-	Allocator methods:
-
-	- __kasan_kmalloc [Redzoning]
-
-	We can ignore:
-
-	- stack-related methods
-	- slab-specific methods
-	- mempool-specific methods
-
-- generic.c
-
-
-	[Allocation/Free metadata for tracking UAF/Double free
-	and pinpointing which allocations bugged out]
-	- kasan_init_object_meta - 
-	- kasan_metadata_size
-	- kasan_record_aux_stack
-
-- report.c
-
 [ We shouldn't need the code for dynamically creating shadow regions
 here, since it is built into the arena.]
 
@@ -83,45 +56,49 @@ Some observations:
   when chaining contexts together. Chaining BPF contexts together is 
   only possible with exceptions, when we are already tearing down
   the execution context. Tracking memory access violations is then
-  not that useful.
-- Some of the 
+  not that useful in that context.
+- We do not dynamically allocate shadow regions. We have a single
+  arena and allocate its "virtual address space" when we create it.
+  The shadow memory region is built into it and never has to expand.
+- We depend on arena page fault reporting for accesses to completely
+  unallocated arena memory. This mirrors how touching nonexistent 
+  memory pages in KASAN triggers a fault. This is why we don't need
+  to eagerly poison the shadow map and can leave it full of 0s, which
+  means memory from bpf_alloc_pages() is immediately valid. This is 
+  also why we poison it when we insert it into the allocator.
 
 
 Basic functionality
 -------------------
 
 [A] Basic buddy allocator prototype
+[M] Stubs for all compiler-generated methods, will be filled in
+during development
 
-[M] Implementation of the ASAN intrinsics [generic.c]
-[M] kasan_check_range
-[M] kasan_byte_accessible
+[M] ASAN intrinsics [generic.c]
 [M] kasan_poison
 [M] kasan_poison_last_granule
 [M] kasan_unpoison
-[M] __asan_memset
-[M] __asan_memmove
-[M] __asan_memcpy
-[M] __kasan_check_read
-[M] __kasan_check_write
 
-[M] __kasan_kmalloc_large
-[M] __kasan_krealloc
-[M] __kasan_kfree
-[M] __kasan_kfree_large
-
-[M] __kasan_unpoison_range
 [M] __kasan_poison_pages
 
-[A]                                 
+[A] __kasan_poison_pages on bpf_page_alloc
+[A] __kasan_unpoison_range on allocation
+[A] kasan_poison_last_granule on freeing
+
+[A] Minimal allocator that can explicitly allocate
+and free certain addresses
 
 [T] Basic passing tests
-	- [TODO: Flesh out]
+	- Get memory into the allocator and ensure it's poisoned
+	- Allocate memory to the user and ensure it's valid
+		- Test with sizes 1 to 128
+	- Allocate memory to the user and ensure memory right
+	  before it and right after it is invalid
+	  	- Same, test with sizes 1 to 128
+	- Allocate with a set memory gap between allocations
+		- Has to be a multiple of GRANULE
 
-
-Shadow region management
-------------------------
-
-????
 
 Alloc/Free Tracking
 -------------------
@@ -134,9 +111,9 @@ Reporting
 ---------
 
 [M] kasan_enable_current  [Critical sections/Nesting]
+[M] kasan_report
 [M] kasan_disable_current [Critical sections/Nesting]
 [M] __asan_report_*() intrinsics
-[M] kasan_report
 [M] kasan_find_first_bad_addr
 [M] kasan_get_alloc_size
 [M] kasan_complete_mode_report_info
@@ -144,14 +121,26 @@ Reporting
 [M] kasan_print_aux_stacks
 [M] kasan_print_address_stack_frame
 [M] kasan_non_canonical_hook
+[M] kasan_save_stack
+[M] kasan_set_track
+[M] kasan_save_trace
 
 Redzoning
 ---------
 
-Invalid Frees
--------------
+[M] __kasan_kmalloc_large
+[M] __kasan_krealloc
+[M] __kasan_kmalloc
+[M] __kasan_kfree
+[M] __kasan_kfree_large
 
+Invalid Allocs/Frees
+--------------------
+
+[M] kasan_byte_accessible
 [M] kasan_report_invalid_free
+[M] __kasan_kfree	[EXPAND]
+[M] __kasan_kfree_large [EXPAND]
 
 Quarantining
 ------------
@@ -162,10 +151,21 @@ Quarantining
 [M] kasan_cache_shrink
 [M] kasan_cache_shutdown
 
-
 Global objects
 --------------
 
 [C] Compiler support/options to instrument in AddressSanitizer.cpp
 [M] __asan_register_globals
 [M] __asan_unregister_globals
+
+Not Strictly Necessary
+----------------------
+
+[M] __asan_memset
+[M] __asan_memmove
+[M] __asan_memcpy
+[M] __kasan_check_read
+[M] __kasan_check_write
+[M] kasan_check_range
+[M] __kasan_unpoison_range
+
