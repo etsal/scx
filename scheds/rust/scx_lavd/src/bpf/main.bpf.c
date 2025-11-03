@@ -841,6 +841,18 @@ int enqueue_cb(struct task_struct __arg_trusted *p)
 	return 0;
 }
 
+void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
+{
+	/* 
+	 * XXX If the task is in a throttled state, find the atq we are
+	 * in, remove it, and modify the shared task state to show we
+	 * are not throttled anymore.
+	 *
+	 * XXX We need to add some more state machinery in the cgroup. When
+	 * we enqueue the task, associate it with the ATQ we are enqueueing 
+	 * it into. When we unthrottle it, clear the ATQ pointer.
+	 */
+}
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
@@ -2110,6 +2122,7 @@ void BPF_STRUCT_OPS(lavd_exit, struct scx_exit_info *ei)
 SCX_OPS_DEFINE(lavd_ops,
 	       .select_cpu		= (void *)lavd_select_cpu,
 	       .enqueue			= (void *)lavd_enqueue,
+	       .dequeue			= (void *)lavd_dequeue,
 	       .dispatch		= (void *)lavd_dispatch,
 	       .runnable		= (void *)lavd_runnable,
 	       .running			= (void *)lavd_running,
