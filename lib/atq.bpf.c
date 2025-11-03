@@ -79,6 +79,22 @@ int scx_atq_insert(scx_atq_t *atq, rbnode_t __arg_arena *node, u64 taskc_ptr)
 	return scx_atq_insert_vtime(atq, node, taskc_ptr, SCX_ATQ_FIFO);
 }
 
+__hidden
+int scx_atq_remove(scx_atq_t *atq, rbnode_t __arg_arena *node)
+{
+	int ret;
+
+	ret = arena_spin_lock(&atq->lock);
+	if (ret)
+		return ret;
+
+	ret = rb_node_remove(atq->tree, node, false);
+
+	arena_spin_unlock(&atq->lock);
+
+	return ret;
+}
+
 /*
  * XXXETSAL: There is a mismatch between insert and pop here: We are inserting
  * rbnodes, but returning a key/value pair. This is deliberate: We can use CO:RE

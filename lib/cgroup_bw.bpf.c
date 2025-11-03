@@ -1448,19 +1448,52 @@ int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vt
 		return -ESRCH;
 	}
 
-	if (taskc->state != SCX_TSK_CANRUN) {
-		cbw_err("Possible double enqueue detected.");
-		return -EACCES;
+	/* 
+	 * Avoid racing inserts by requiring insert operations to happen
+	 * under a spinlock. An ATQ pop dequeue cannot race with an
+	 * an insert unless there is a bug (why pop an unenqueued task?).
+	 */
+	if (arena_spin_lock(&task->lock)) {
+		cbw_err("Arena spinlock timed out, possible deadlock.");
+		return -EBUSY;
 	}
-	taskc->state = SCX_TSK_THROTTLED;
 
-	ret = scx_atq_insert_vtime(llcx->btq, (rbnode_t *)&taskc->atq,
+	if (taskc->rbnode != NULL) {
+		/* 
+		 * Not really a bug: The initial .enqueue() may race with
+		 * a pair of .dequeue()/.enqueue() calls, and cause two 
+		 * instances of this function to happen simultaneously
+		 * for the task. This should be rare, but possible.
+		 * The spinlock turns the race into a benign one.
+		 *
+		 * We test rbnode instead of throttled_atq because rbnode
+		 * is protected by the ATQ lock. This prevents a race
+		 * between the BPF .dequeue() method and the ATQ .pop()
+		 * that can cause a double remove:
+		 *
+		 * .pop()
+		 *				.dequeue()
+		 *				if (atq_throttled != NULL)
+		 *					.remove()
+		 * .atq_throttled = NULL 
+		 */
+		cbw_dbg("Possible double enqueue detected.");
+		arena_spin_unlock(&task->lock);
+		return 0;
+	}
+
+	ret = scx_atq_insert_vtime(llcx->btq, (rbnode_t *)&taskc->node,
 				   (u64)taskc, vtime);
 	if (ret) {
-		taskc->state = SCX_TSK_CANRUN;
 		cbw_err("Failed to insert a task to BTQ: %d", ret);
 	} else if (!READ_ONCE(llcx->has_backlogged_tasks))
 		WRITE_ONCE(llcx->has_backlogged_tasks, true);
+
+	/* Associate task with the ATQ on a successful insert. */
+	if (!ret)
+		taskc->throttled_atq = llcx->btq;
+
+	arena_spin_unlock(&task->lock);
 
 	return ret;
 }
@@ -1796,15 +1829,23 @@ int cbw_drain_btq_until_throttled(struct scx_cgroup_ctx *cgx,
 	 * Pop the tasks in the BTQ and ask the BPF scheduler to enqueue
 	 * them to a DSQ for execution until the BTQ becomes empty or
 	 * the cgroup is throttled.
+	 *
+	 * The .pop() operation is concurrency-safe because all ATQ operations
+	 * serialize on its lock. The task we retrieve with it is guaranteed
+	 * to have been enqueued and not been dequeued. ATQ integrity aside,
+	 * the main problem is that because a .dequeue() callback can happen
+	 * at any point.
 	 */
 	for (i = 0; i < CBW_REENQ_MAX_BATCH &&
 		    !READ_ONCE(cgx->is_throttled) &&
 		    (taskc = (scx_task_common *)scx_atq_pop(llcx->btq)) &&
 		    can_loop; i++) {
 
-		if (taskc->state != SCX_TSK_THROTTLED)
-			continue;
-		taskc->state = SCX_TSK_CANRUN;
+		/* 
+		 * We do not worry about racing with .dequeue() here, because 
+		 * even if we do, the callback's insert_vtime call will fail
+		 * silently in the scx core. 
+		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
 		cbw_dbg("cgid%llu", cgx->id);
@@ -2006,5 +2047,57 @@ int scx_cgroup_bw_reenqueue(void)
 			CBW_REPLENISH_STAT_BOTTOM_HALF_RUNNING,
 			CBW_REPLENISH_STAT_IDLE);
 	}
+	return 0;
+}
+
+/*
+ * cbw_cancel - Cancel throttling for a task. 
+ *
+ * @ctx: "Pointer" to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the main scheduler.
+ *
+ * Tasks may be dequeued from the BPF side by the scx core during system
+ * calls like sched_setaffinity(2). In that case, we must cancel any 
+ * throttling-related ATQ insert operations for the task:
+ * - We must avoid double inserts caused by the dequeued task being
+ *   reenqueed and throttled again while still in an ATQ.
+ * - We want to remove tasks not in scx anymore from throttling. While
+ *   inserting non-scx tasks into a DSQ is a no-op, we would like our
+ *   accounting to be as accurate as possible.
+ */
+__weak
+int cbw_cancel(u64 ctx)
+{
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	int ret;
+
+	if (arena_spin_lock(&taskc->lock)) {
+		scx_bpf_error("Failed to lock task_ctx for task %d", p->pid);
+		return 0;
+	}
+
+	/* 
+	 * Remove the task from any throttling state. We are taking the lock 
+	 * because it protects the embedded rbnode and throttled_atq struct.
+	 *
+	 * See explanation in scx_cgroup_bw_put_aside() for justification on
+	 * why we test .rbnode instead of .throttled_atq.
+	 */
+	if (!taskc->rbnode) {
+		ret = 0;
+		goto done;
+	}
+
+	ret = rb_node_remove(taskc->atq, taskc->rbnode);
+	if (ret) {
+		cbw_err("Failed to remove node from task");
+		goto done;
+	}
+
+	taskc->throttled_atq = NULL;
+
+done:
+	arena_spin_unlock(&task->lock);
+
 	return 0;
 }
