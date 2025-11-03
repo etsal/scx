@@ -843,15 +843,16 @@ int enqueue_cb(struct task_struct __arg_trusted *p)
 
 void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 {
-	/* 
-	 * XXX If the task is in a throttled state, find the atq we are
-	 * in, remove it, and modify the shared task state to show we
-	 * are not throttled anymore.
-	 *
-	 * XXX We need to add some more state machinery in the cgroup. When
-	 * we enqueue the task, associate it with the ATQ we are enqueueing 
-	 * it into. When we unthrottle it, clear the ATQ pointer.
-	 */
+	task_ctx *taskc = get_task_ctx(p);
+	int ret;
+
+	if (!taskc) {
+		scx_bpf_error("Failed to lookup task_ctx for task %d", p->pid);
+		return;
+	}
+
+	cbw_cancel(taskc);
+
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
