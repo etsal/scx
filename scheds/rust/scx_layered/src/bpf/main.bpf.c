@@ -767,11 +767,11 @@ int save_gpu_tgid_pid(void) {
 
 			timestamp = taskc->running_at;
 		} else {
-			bpf_prink("[BUG] %s:%d", __func__, __LINE__);
+			bpf_printk("[BUG] %s:%d", __func__, __LINE__);
 		}
 
 		if (!taskc->running_at)
-			bpf_prink("[BUG] %s:%d", __func__, __LINE__);
+			bpf_printk("[BUG] %s:%d", __func__, __LINE__);
 
 		/* Same logic for the parent. */
 		if ((parent = lookup_task_ctx_may_fail(p->parent))) {
@@ -783,10 +783,10 @@ int save_gpu_tgid_pid(void) {
 			if (parent->recheck_layer_membership == MEMBER_EXPIRED)
 				parent->refresh_layer = true;
 		} else {
-			bpf_prink("[BUG] %s:%d", __func__, __LINE__);
+			bpf_printk("[BUG] %s:%d", __func__, __LINE__);
 		}
 	} else {
-		bpf_prink("[BUG] %s:%d", __func__, __LINE__);
+		bpf_printk("[BUG] %s:%d", __func__, __LINE__);
 	}
 	bpf_map_update_elem(&gpu_tid, &tid, &timestamp, BPF_ANY);
 	bpf_map_update_elem(&gpu_tgid, &pid, &timestamp, BPF_ANY);
@@ -2611,8 +2611,11 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 				last_used = bpf_map_lookup_elem(&gpu_tgid, &key);
 
 			/* If not found, we want the used predicate to be required false. */
-			if (!last_used || *last_used == MEMBER_INVALID)
+			if (!last_used || *last_used == MEMBER_INVALID) {
+				if (!must_be_used)
+					bpf_printk("[%s] %s:%d", !must_be_used ? "MATCH" : "NOMATCH", __func__, __LINE__);
 				return !must_be_used;
+			}
 
 			/*
 			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
@@ -2627,6 +2630,7 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 				taskc->recheck_layer_membership = MEMBER_EXPIRED;
 			}
 
+			bpf_printk("[%s] %s:%d", recently_used == must_be_used ? "MATCH" : "NOMATCH", __func__, __LINE__);
 			return recently_used == must_be_used;
 	}
 	case MATCH_AVG_RUNTIME: {
