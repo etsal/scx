@@ -256,8 +256,14 @@ pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
 pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &ProgramImpl<T>) -> Result<bool> {
     if in_kallsyms(sym)? {
         unsafe {
-            bpf_program__attach_kprobe(prog_ptr.as_libbpf_object().as_ptr(), true, sym.as_ptr() as *const c_char);
-        }
+            let link = bpf_program__attach_kprobe(prog_ptr.as_libbpf_object().as_ptr(), true, sym.as_ptr() as *const c_char);
+            if link as u64 == 0 {
+                bail!("failed to attach kprobe on {sym}");
+            }
+        };
+
+
+
         return Ok(true);
     } else {
         warn!("symbol {sym} is missing, kprobe not loaded");
