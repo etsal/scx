@@ -780,8 +780,10 @@ int save_gpu_tgid_pid(void) {
 				parent->refresh_layer = true;
 			}
 
-			if (parent->recheck_layer_membership == MEMBER_EXPIRED)
+			if (parent->recheck_layer_membership == MEMBER_EXPIRED) {
 				parent->refresh_layer = true;
+				bpf_printk("[PARENT RE-EVAL] pid %ld tgid %ld", tid, pid);
+			}
 		} else {
 			bpf_printk("[BUG] %s:%d", __func__, __LINE__);
 		}

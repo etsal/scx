@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use libbpf_rs::libbpf_sys::*;
-use libbpf_rs::{AsRawLibbpf, OpenProgramImpl};
+use libbpf_rs::{AsRawLibbpf, OpenProgramImpl, ProgramImpl};
 use log::warn;
 use std::env;
 use std::ffi::c_void;
@@ -16,6 +16,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
+use libc::c_char;
 
 const PROCFS_MOUNTS: &str = "/proc/mounts";
 const TRACEFS: &str = "tracefs";
@@ -252,10 +253,10 @@ pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
     Ok(false)
 }
 
-pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {
+pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &ProgramImpl<T>) -> Result<bool> {
     if in_kallsyms(sym)? {
         unsafe {
-            bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
+            bpf_program__attach_kprobe(prog_ptr.as_libbpf_object().as_ptr(), true, sym.as_ptr() as *const c_char);
         }
         return Ok(true);
     } else {
