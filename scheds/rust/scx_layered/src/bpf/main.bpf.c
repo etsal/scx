@@ -766,7 +766,12 @@ int save_gpu_tgid_pid(void) {
 				taskc->refresh_layer = true;
 
 			timestamp = taskc->running_at;
+		} else {
+			bpf_prink("[BUG] %s:%d", __func__, __LINE__);
 		}
+
+		if (!taskc->running_at)
+			bpf_prink("[BUG] %s:%d", __func__, __LINE__);
 
 		/* Same logic for the parent. */
 		if ((parent = lookup_task_ctx_may_fail(p->parent))) {
@@ -777,7 +782,11 @@ int save_gpu_tgid_pid(void) {
 
 			if (parent->recheck_layer_membership == MEMBER_EXPIRED)
 				parent->refresh_layer = true;
+		} else {
+			bpf_prink("[BUG] %s:%d", __func__, __LINE__);
 		}
+	} else {
+		bpf_prink("[BUG] %s:%d", __func__, __LINE__);
 	}
 	bpf_map_update_elem(&gpu_tid, &tid, &timestamp, BPF_ANY);
 	bpf_map_update_elem(&gpu_tgid, &pid, &timestamp, BPF_ANY);
