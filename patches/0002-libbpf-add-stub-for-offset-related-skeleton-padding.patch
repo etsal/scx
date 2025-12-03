@@ -1,0 +1,131 @@
+From 548b5cb098c9532086d210e90cd0d22d7e8d0280 Mon Sep 17 00:00:00 2001
+From: Emil Tsalapatis <emil@etsalapatis.com>
+Date: Mon, 17 Nov 2025 17:42:17 -0500
+Subject: [PATCH 2/9] libbpf: add stub for offset-related skeleton padding
+
+Add a stub function for reporting in which offset within a mapping
+libbpf places the map's data. This will be used in a subsequent
+patch to support offsetting arena variables within the mapped region.
+
+Adjust skeleton generation to account for the new arena memory layout
+by adding padding corresponding to the offset into the arena map. Add
+a libbbpf API function to get the data offset within the map's mapping
+during skeleton generation.
+
+Signed-off-by: Emil Tsalapatis <emil@etsalapatis.com>
+---
+ tools/bpf/bpftool/gen.c  | 23 +++++++++++++++++++++--
+ tools/lib/bpf/libbpf.c   | 10 ++++++++++
+ tools/lib/bpf/libbpf.h   |  9 +++++++++
+ tools/lib/bpf/libbpf.map |  1 +
+ 4 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/tools/bpf/bpftool/gen.c b/tools/bpf/bpftool/gen.c
+index 993c7d9484a4..6ed125b1b465 100644
+--- a/tools/bpf/bpftool/gen.c
++++ b/tools/bpf/bpftool/gen.c
+@@ -148,7 +148,8 @@ static int codegen_datasec_def(struct bpf_object *obj,
+ 			       struct btf *btf,
+ 			       struct btf_dump *d,
+ 			       const struct btf_type *sec,
+-			       const char *obj_name)
++			       const char *obj_name,
++			       int var_off)
+ {
+ 	const char *sec_name = btf__name_by_offset(btf, sec->name_off);
+ 	const struct btf_var_secinfo *sec_var = btf_var_secinfos(sec);
+@@ -163,6 +164,17 @@ static int codegen_datasec_def(struct bpf_object *obj,
+ 		strip_mods = true;
+ 
+ 	printf("	struct %s__%s {\n", obj_name, sec_ident);
++
++	/*
++	 * Arena variables may be placed in an offset within the section.
++	 * Represent this in the skeleton using a padding struct.
++	 */
++	if (var_off > 0) {
++		printf("\t\tchar __pad%d[%d];\n",
++			pad_cnt, var_off);
++		pad_cnt++;
++	}
++
+ 	for (i = 0; i < vlen; i++, sec_var++) {
+ 		const struct btf_type *var = btf__type_by_id(btf, sec_var->type);
+ 		const char *var_name = btf__name_by_offset(btf, var->name_off);
+@@ -279,6 +291,7 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
+ 	struct bpf_map *map;
+ 	const struct btf_type *sec;
+ 	char map_ident[256];
++	int var_off;
+ 	int err = 0;
+ 
+ 	d = btf_dump__new(btf, codegen_btf_dump_printf, NULL, NULL);
+@@ -303,7 +316,13 @@ static int codegen_datasecs(struct bpf_object *obj, const char *obj_name)
+ 			printf("	struct %s__%s {\n", obj_name, map_ident);
+ 			printf("	} *%s;\n", map_ident);
+ 		} else {
+-			err = codegen_datasec_def(obj, btf, d, sec, obj_name);
++			var_off = bpf_map__data_offset(map);
++			if (var_off < 0)  {
++				p_err("bpf_map__data_offset called on unmapped map\n");
++				err = var_off;
++				goto out;
++			}
++			err = codegen_datasec_def(obj, btf, d, sec, obj_name, var_off);
+ 			if (err)
+ 				goto out;
+ 		}
+diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
+index 706e7481bdf6..32dac36ba8db 100644
+--- a/tools/lib/bpf/libbpf.c
++++ b/tools/lib/bpf/libbpf.c
+@@ -10552,6 +10552,16 @@ const char *bpf_map__name(const struct bpf_map *map)
+ 	return map->name;
+ }
+ 
++int bpf_map__data_offset(const struct bpf_map *map)
++{
++	if (!map->mmaped)
++		return -EINVAL;
++
++	/* No offsetting for now. */
++	return 0;
++}
++
++
+ enum bpf_map_type bpf_map__type(const struct bpf_map *map)
+ {
+ 	return map->def.type;
+diff --git a/tools/lib/bpf/libbpf.h b/tools/lib/bpf/libbpf.h
+index 5118d0a90e24..549289dd9891 100644
+--- a/tools/lib/bpf/libbpf.h
++++ b/tools/lib/bpf/libbpf.h
+@@ -1314,6 +1314,15 @@ LIBBPF_API int bpf_map__set_exclusive_program(struct bpf_map *map, struct bpf_pr
+  */
+ LIBBPF_API struct bpf_program *bpf_map__exclusive_program(struct bpf_map *map);
+ 
++/*
++ * @brief **bpf_map__data_offset** returns the offset of the map's data
++ * within the address mapping.
++ * @param BPF map whose variable offset we are looking into.
++ * @return the offset >= 0 of the map's contents within its mapping; negative
++ * error code, otherwise.
++ */
++LIBBPF_API int bpf_map__data_offset(const struct bpf_map *map);
++
+ struct bpf_xdp_set_link_opts {
+ 	size_t sz;
+ 	int old_fd;
+diff --git a/tools/lib/bpf/libbpf.map b/tools/lib/bpf/libbpf.map
+index 8ed8749907d4..ac932ee3a932 100644
+--- a/tools/lib/bpf/libbpf.map
++++ b/tools/lib/bpf/libbpf.map
+@@ -451,4 +451,5 @@ LIBBPF_1.7.0 {
+ 	global:
+ 		bpf_map__set_exclusive_program;
+ 		bpf_map__exclusive_program;
++		bpf_map__data_offset;
+ } LIBBPF_1.6.0;
+-- 
+2.49.0
+

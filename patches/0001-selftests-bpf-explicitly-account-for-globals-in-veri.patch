@@ -1,0 +1,59 @@
+From 9eb73c0a2101c78ffd8d7e0fe8cbc36b8796d3ee Mon Sep 17 00:00:00 2001
+From: Emil Tsalapatis <emil@etsalapatis.com>
+Date: Mon, 17 Nov 2025 17:40:31 -0500
+Subject: [PATCH 1/9] selftests/bpf: explicitly account for globals in
+ verifier_arena_large
+
+The big_alloc1 test in verifier_arena_large assumes that the arena base
+and the first page allocated by bpf_arena_alloc_pages are identical.
+This is not the case, because the first page in the arena is populated
+by global arena data. The test still passes because the code makes the
+tacit assumption that the first page is on offset PAGE_SIZE instead of
+0.
+
+Make this distinction explicit in the code, and adjust the page offsets
+requested during the test to count from the beginning of the arena
+instead of using the address of the first allocated page.
+
+Signed-off-by: Emil Tsalapatis <emil@etsalapatis.com>
+---
+ .../selftests/bpf/progs/verifier_arena_large.c    | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/tools/testing/selftests/bpf/progs/verifier_arena_large.c b/tools/testing/selftests/bpf/progs/verifier_arena_large.c
+index f19e15400b3e..bd430a34c3ab 100644
+--- a/tools/testing/selftests/bpf/progs/verifier_arena_large.c
++++ b/tools/testing/selftests/bpf/progs/verifier_arena_large.c
+@@ -23,18 +23,25 @@ int big_alloc1(void *ctx)
+ {
+ #if defined(__BPF_FEATURE_ADDR_SPACE_CAST)
+ 	volatile char __arena *page1, *page2, *no_page, *page3;
+-	void __arena *base;
++	u64 base;
+ 
+-	page1 = base = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
++	base = (u64)arena_base(&arena);
++
++	page1 = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
+ 	if (!page1)
+ 		return 1;
++
++	/* Account for global arena data. */
++	if ((u64)page1 != base + PAGE_SIZE)
++		return 15;
++
+ 	*page1 = 1;
+-	page2 = bpf_arena_alloc_pages(&arena, base + ARENA_SIZE - PAGE_SIZE * 2,
++	page2 = bpf_arena_alloc_pages(&arena, (void __arena *)(ARENA_SIZE - PAGE_SIZE),
+ 				      1, NUMA_NO_NODE, 0);
+ 	if (!page2)
+ 		return 2;
+ 	*page2 = 2;
+-	no_page = bpf_arena_alloc_pages(&arena, base + ARENA_SIZE - PAGE_SIZE,
++	no_page = bpf_arena_alloc_pages(&arena, (void __arena *)ARENA_SIZE,
+ 					1, NUMA_NO_NODE, 0);
+ 	if (no_page)
+ 		return 3;
+-- 
+2.49.0
+

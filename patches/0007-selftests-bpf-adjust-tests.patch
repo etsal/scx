@@ -1,0 +1,170 @@
+From 00cc33a0aaae43e7cb17acc77a21b09423e99598 Mon Sep 17 00:00:00 2001
+From: Emil Tsalapatis <emil@etsalapatis.com>
+Date: Tue, 2 Dec 2025 12:34:30 -0500
+Subject: [PATCH 7/9] selftests/bpf: adjust tests
+
+---
+ .../selftests/bpf/prog_tests/verifier.c       |  2 -
+ .../bpf/progs/verifier_arena_globals1.c       | 12 ++--
+ .../bpf/progs/verifier_arena_globals3.c       | 61 -------------------
+ .../bpf/progs/verifier_arena_large.c          |  9 ++-
+ 4 files changed, 13 insertions(+), 71 deletions(-)
+ delete mode 100644 tools/testing/selftests/bpf/progs/verifier_arena_globals3.c
+
+diff --git a/tools/testing/selftests/bpf/prog_tests/verifier.c b/tools/testing/selftests/bpf/prog_tests/verifier.c
+index 0c64fbc9a194..5829ffd70f8f 100644
+--- a/tools/testing/selftests/bpf/prog_tests/verifier.c
++++ b/tools/testing/selftests/bpf/prog_tests/verifier.c
+@@ -8,7 +8,6 @@
+ #include "verifier_arena_large.skel.h"
+ #include "verifier_arena_globals1.skel.h"
+ #include "verifier_arena_globals2.skel.h"
+-#include "verifier_arena_globals3.skel.h"
+ #include "verifier_array_access.skel.h"
+ #include "verifier_async_cb_context.skel.h"
+ #include "verifier_basic_stack.skel.h"
+@@ -152,7 +151,6 @@ void test_verifier_arena(void)                { RUN(verifier_arena); }
+ void test_verifier_arena_large(void)          { RUN(verifier_arena_large); }
+ void test_verifier_arena_globals1(void)       { RUN(verifier_arena_globals1); }
+ void test_verifier_arena_globals2(void)       { RUN(verifier_arena_globals2); }
+-void test_verifier_arena_globals3(void)       { RUN(verifier_arena_globals3); }
+ void test_verifier_basic_stack(void)          { RUN(verifier_basic_stack); }
+ void test_verifier_bitfield_write(void)       { RUN(verifier_bitfield_write); }
+ void test_verifier_bounds(void)               { RUN(verifier_bounds); }
+diff --git a/tools/testing/selftests/bpf/progs/verifier_arena_globals1.c b/tools/testing/selftests/bpf/progs/verifier_arena_globals1.c
+index a1fcd9bbe2e4..3e68a5e83db8 100644
+--- a/tools/testing/selftests/bpf/progs/verifier_arena_globals1.c
++++ b/tools/testing/selftests/bpf/progs/verifier_arena_globals1.c
+@@ -10,14 +10,12 @@
+ #include "bpf_misc.h"
+ 
+ #define ARENA_PAGES (64)
+-
+-/* Set in libbpf. */
+-#define GLOBALS_PGOFF (ARENA_PAGES - 1)
++#define GLOBAL_PAGES (16)
+ 
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_ARENA);
+ 	__uint(map_flags, BPF_F_MMAPABLE);
+-	__uint(max_entries, ARENA_PAGES); /* Arena of 64 pages (standard offset is 16 pages) */
++	__uint(max_entries, ARENA_PAGES); /* Arena of 64 pages */
+ #ifdef __TARGET_ARCH_arm64
+ 	__ulong(map_extra, (1ull << 32) | (~0u - __PAGE_SIZE * ARENA_PAGES + 1));
+ #else
+@@ -31,7 +29,7 @@ struct {
+  * ensure the offset doesn't unexpectedly change from
+  * under us.
+  */
+-char __arena global_data[PAGE_SIZE][ARENA_PAGES - GLOBALS_PGOFF];
++char __arena global_data[PAGE_SIZE][GLOBAL_PAGES];
+ 
+ SEC("syscall")
+ __success __retval(0)
+@@ -42,10 +40,10 @@ int check_reserve1(void *ctx)
+ 	int ret;
+ 
+ 	guard = (void __arena *)arena_base(&arena);
+-	globals = (void __arena *)(arena_base(&arena) + GLOBALS_PGOFF * PAGE_SIZE);
++	globals = (void __arena *)(arena_base(&arena) + (ARENA_PAGES - GLOBAL_PAGES) * PAGE_SIZE);
+ 
+ 	/* Reserve the region we've offset the globals by. */
+-	ret = bpf_arena_reserve_pages(&arena, guard, GLOBALS_PGOFF);
++	ret = bpf_arena_reserve_pages(&arena, guard, ARENA_PAGES - GLOBAL_PAGES);
+ 	if (ret)
+ 		return 1;
+ 
+diff --git a/tools/testing/selftests/bpf/progs/verifier_arena_globals3.c b/tools/testing/selftests/bpf/progs/verifier_arena_globals3.c
+deleted file mode 100644
+index 62d1a46955fd..000000000000
+--- a/tools/testing/selftests/bpf/progs/verifier_arena_globals3.c
++++ /dev/null
+@@ -1,61 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/* Copyright (c) 2025 Meta Platforms, Inc. and affiliates. */
+-
+-#define BPF_NO_KFUNC_PROTOTYPES
+-#include <vmlinux.h>
+-#include <bpf/bpf_helpers.h>
+-#include <bpf/bpf_tracing.h>
+-#include "bpf_misc.h"
+-#include "bpf_experimental.h"
+-#include "bpf_arena_common.h"
+-
+-#define ARENA_PAGES (32)
+-
+-#define ARENA_AVAIL_PAGES (6)
+-
+-struct {
+-	__uint(type, BPF_MAP_TYPE_ARENA);
+-	__uint(map_flags, BPF_F_MMAPABLE);
+-	__uint(max_entries, ARENA_PAGES); /* Arena of 32 pages (standard offset is 16 pages) */
+-#ifdef __TARGET_ARCH_arm64
+-	__ulong(map_extra, (1ull << 32) | (~0u - __PAGE_SIZE * ARENA_PAGES + 1));
+-#else
+-	__ulong(map_extra, (1ull << 44) | (~0u - __PAGE_SIZE * ARENA_PAGES + 1));
+-#endif
+-} arena SEC(".maps");
+-
+-/*
+- * Enough global data to fill most of the arena. Force libbpf to
+- * adjust the offset into the arena enough for the data to fit.
+- */
+-
+-char __arena global_data[PAGE_SIZE][ARENA_PAGES - ARENA_AVAIL_PAGES];
+-
+-SEC("syscall")
+-__success __retval(0)
+-int check_reserve3(void *ctx)
+-{
+-#if defined(__BPF_FEATURE_ADDR_SPACE_CAST)
+-	void __arena *guard, *globals;
+-	int ret;
+-
+-	guard = (void __arena *)arena_base(&arena);
+-	globals = (void __arena *)(arena_base(&arena) + 4 * PAGE_SIZE);
+-
+-	/*
+-	 * The data should be offset 4 pages in (the largest
+-	 * possible power of 2 that still leaves enough room
+-	 * to the global data).
+-	 */
+-	ret = bpf_arena_reserve_pages(&arena, guard, 4);
+-	if (ret)
+-		return 1;
+-
+-	ret = bpf_arena_reserve_pages(&arena, globals, 1);
+-	if (!ret)
+-		return 2;
+-#endif
+-	return 0;
+-}
+-
+-char _license[] SEC("license") = "GPL";
+diff --git a/tools/testing/selftests/bpf/progs/verifier_arena_large.c b/tools/testing/selftests/bpf/progs/verifier_arena_large.c
+index d076da4c5994..2b8cf2a4d880 100644
+--- a/tools/testing/selftests/bpf/progs/verifier_arena_large.c
++++ b/tools/testing/selftests/bpf/progs/verifier_arena_large.c
+@@ -35,11 +35,18 @@ int big_alloc1(void *ctx)
+ 		return 15;
+ 
+ 	*page1 = 1;
+-	page2 = bpf_arena_alloc_pages(&arena, (void __arena *)(ARENA_SIZE - PAGE_SIZE),
++	page2 = bpf_arena_alloc_pages(&arena, (void __arena *)(ARENA_SIZE - 2 * PAGE_SIZE),
+ 				      1, NUMA_NO_NODE, 0);
+ 	if (!page2)
+ 		return 2;
+ 	*page2 = 2;
++
++	/* Test for the guard region at the end of the arena. */
++	no_page = bpf_arena_alloc_pages(&arena, (void __arena *)ARENA_SIZE - PAGE_SIZE,
++					1, NUMA_NO_NODE, 0);
++	if (no_page)
++		return 16;
++
+ 	no_page = bpf_arena_alloc_pages(&arena, (void __arena *)ARENA_SIZE,
+ 					1, NUMA_NO_NODE, 0);
+ 	if (no_page)
+-- 
+2.49.0
+

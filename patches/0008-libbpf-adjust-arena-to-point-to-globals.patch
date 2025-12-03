@@ -1,0 +1,37 @@
+From 281d8351e0a512156a95c7c8ccf1953c2ec76556 Mon Sep 17 00:00:00 2001
+From: Emil Tsalapatis <emil@etsalapatis.com>
+Date: Tue, 2 Dec 2025 13:45:34 -0500
+Subject: [PATCH 8/9] libbpf: adjust arena to point to globals
+
+---
+ tools/lib/bpf/libbpf.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
+index 3f4507c2303b..343a0c4d2be8 100644
+--- a/tools/lib/bpf/libbpf.c
++++ b/tools/lib/bpf/libbpf.c
+@@ -14406,6 +14406,7 @@ void bpf_object__destroy_subskeleton(struct bpf_object_subskeleton *s)
+ 
+ int bpf_object__load_skeleton(struct bpf_object_skeleton *s)
+ {
++	void *mmaped;
+ 	int i, err;
+ 
+ 	err = bpf_object__load(*s->obj);
+@@ -14421,7 +14422,11 @@ int bpf_object__load_skeleton(struct bpf_object_skeleton *s)
+ 		if (!map_skel->mmaped)
+ 			continue;
+ 
+-		*map_skel->mmaped = map->mmaped;
++		mmaped = map->mmaped;
++		if (map->def.type == BPF_MAP_TYPE_ARENA)
++			mmaped += map->obj->arena_data_off;
++
++		*map_skel->mmaped = mmaped;
+ 	}
+ 
+ 	return 0;
+-- 
+2.49.0
+

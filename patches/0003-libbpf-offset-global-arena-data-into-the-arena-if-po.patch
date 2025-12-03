@@ -1,0 +1,149 @@
+From 8afb0ad2cfc6e98e42ed661b9aed6f3a1ceeb777 Mon Sep 17 00:00:00 2001
+From: Emil Tsalapatis <emil@etsalapatis.com>
+Date: Fri, 14 Nov 2025 13:54:03 -0500
+Subject: [PATCH 3/9] libbpf: offset global arena data into the arena if
+ possible
+
+Currently, libbpf places global arena data at the very beginning of
+the arena mapping. Stray NULL dereferences into the arena then find
+valid data and lead to silent corruption instead of causing an arena
+page fault. The data is placed in the mapping at load time, preventing
+us from reserving the region using bpf_arena_reserve_pages().
+
+Adjust the arena logic to attempt placing the data from an offset within
+the arena (currently 16 pages in) instead of the very beginning. If
+placing the data at an offset would lead to an allocation failure due
+to global data being as large as the entire arena, progressively reduce
+the offset down to 0 until placement succeeds.
+
+Adjust existing arena tests in the same commit to account for the new
+global data offset. New tests that explicitly consider the new feature
+are introduced in the next patch.
+
+Signed-off-by: Emil Tsalapatis <emil@etsalapatis.com>
+---
+ tools/lib/bpf/libbpf.c                        | 30 +++++++++++++++----
+ .../bpf/progs/verifier_arena_large.c          | 14 +++++++--
+ 2 files changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
+index 32dac36ba8db..6f40c6321935 100644
+--- a/tools/lib/bpf/libbpf.c
++++ b/tools/lib/bpf/libbpf.c
+@@ -757,6 +757,7 @@ struct bpf_object {
+ 	int arena_map_idx;
+ 	void *arena_data;
+ 	size_t arena_data_sz;
++	__u32 arena_data_off;
+ 
+ 	void *jumptables_data;
+ 	size_t jumptables_data_sz;
+@@ -2991,10 +2992,14 @@ static int init_arena_map_data(struct bpf_object *obj, struct bpf_map *map,
+ 			       void *data, size_t data_sz)
+ {
+ 	const long page_sz = sysconf(_SC_PAGE_SIZE);
++	const size_t data_alloc_sz = roundup(data_sz, page_sz);
++	/* default offset into the arena, may be resized */
++	const long max_off_pages = 16;
+ 	size_t mmap_sz;
++	long off_pages;
+ 
+ 	mmap_sz = bpf_map_mmap_sz(map);
+-	if (roundup(data_sz, page_sz) > mmap_sz) {
++	if (data_alloc_sz > mmap_sz) {
+ 		pr_warn("elf: sec '%s': declared ARENA map size (%zu) is too small to hold global __arena variables of size %zu\n",
+ 			sec_name, mmap_sz, data_sz);
+ 		return -E2BIG;
+@@ -3006,6 +3011,17 @@ static int init_arena_map_data(struct bpf_object *obj, struct bpf_map *map,
+ 	memcpy(obj->arena_data, data, data_sz);
+ 	obj->arena_data_sz = data_sz;
+ 
++	/*
++	 * find the largest offset for global arena variables
++	 * where they still fit in the arena
++	 */
++	for (off_pages = max_off_pages; off_pages > 0; off_pages >>= 1) {
++		if (off_pages * page_sz + data_alloc_sz <= mmap_sz)
++			break;
++	}
++
++	obj->arena_data_off = off_pages * page_sz;
++
+ 	/* make bpf_map__init_value() work for ARENA maps */
+ 	map->mmaped = obj->arena_data;
+ 
+@@ -4663,7 +4679,7 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
+ 		reloc_desc->type = RELO_DATA;
+ 		reloc_desc->insn_idx = insn_idx;
+ 		reloc_desc->map_idx = obj->arena_map_idx;
+-		reloc_desc->sym_off = sym->st_value;
++		reloc_desc->sym_off = sym->st_value + obj->arena_data_off;
+ 
+ 		map = &obj->maps[obj->arena_map_idx];
+ 		pr_debug("prog '%s': found arena map %d (%s, sec %d, off %zu) for insn %u\n",
+@@ -5624,7 +5640,8 @@ bpf_object__create_maps(struct bpf_object *obj)
+ 					return err;
+ 				}
+ 				if (obj->arena_data) {
+-					memcpy(map->mmaped, obj->arena_data, obj->arena_data_sz);
++					memcpy(map->mmaped + obj->arena_data_off, obj->arena_data,
++						obj->arena_data_sz);
+ 					zfree(&obj->arena_data);
+ 				}
+ 			}
+@@ -10557,8 +10574,11 @@ int bpf_map__data_offset(const struct bpf_map *map)
+ 	if (!map->mmaped)
+ 		return -EINVAL;
+ 
+-	/* No offsetting for now. */
+-	return 0;
++	/* Only arenas have offsetting. */
++	if (map->def.type != BPF_MAP_TYPE_ARENA)
++		return 0;
++
++	return map->obj->arena_data_off;
+ }
+ 
+ 
+diff --git a/tools/testing/selftests/bpf/progs/verifier_arena_large.c b/tools/testing/selftests/bpf/progs/verifier_arena_large.c
+index bd430a34c3ab..f72198596889 100644
+--- a/tools/testing/selftests/bpf/progs/verifier_arena_large.c
++++ b/tools/testing/selftests/bpf/progs/verifier_arena_large.c
+@@ -10,6 +10,7 @@
+ #include "bpf_arena_common.h"
+ 
+ #define ARENA_SIZE (1ull << 32)
++#define GLOBAL_PGOFF (16)
+ 
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_ARENA);
+@@ -31,8 +32,7 @@ int big_alloc1(void *ctx)
+ 	if (!page1)
+ 		return 1;
+ 
+-	/* Account for global arena data. */
+-	if ((u64)page1 != base + PAGE_SIZE)
++	if ((u64)page1 != base)
+ 		return 15;
+ 
+ 	*page1 = 1;
+@@ -216,6 +216,16 @@ int big_alloc2(void *ctx)
+ 	__u8 __arena *pg;
+ 	int i, err;
+ 
++	/*
++	 * The global data is placed in a page with global offset 16.
++	 * This test is about page allocation contiguity, so avoid
++	 * accounting for the stray allocation by also allocating
++	 * all pages before it. We never use the page range, so leak it.
++	 */
++	pg = bpf_arena_alloc_pages(&arena, NULL, GLOBAL_PGOFF, NUMA_NO_NODE, 0);
++	if (!pg)
++		return 10;
++
+ 	base = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
+ 	if (!base)
+ 		return 1;
+-- 
+2.49.0
+

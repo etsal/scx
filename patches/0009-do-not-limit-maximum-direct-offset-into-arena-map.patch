@@ -1,0 +1,34 @@
+From c94ecf1ce77bcbf5d4308a26036c379b3fac21e8 Mon Sep 17 00:00:00 2001
+From: Emil Tsalapatis <emil@etsalapatis.com>
+Date: Tue, 2 Dec 2025 21:31:45 -0500
+Subject: [PATCH 9/9] do not limit maximum direct offset into arena map
+
+---
+ kernel/bpf/verifier.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 098dd7f21c89..a64cc5caf4aa 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -21084,13 +21084,13 @@ static int resolve_pseudo_ldimm64(struct bpf_verifier_env *env)
+ 			} else {
+ 				u32 off = insn[1].imm;
+ 
+-				if (off >= BPF_MAX_VAR_OFF) {
+-					verbose(env, "direct value offset of %u is not allowed\n", off);
++				if (!map->ops->map_direct_value_addr) {
++					verbose(env, "no direct value access support for this map type\n");
+ 					return -EINVAL;
+ 				}
+ 
+-				if (!map->ops->map_direct_value_addr) {
+-					verbose(env, "no direct value access support for this map type\n");
++				if (off >= BPF_MAX_VAR_OFF && map->map_type != BPF_MAP_TYPE_ARENA) {
++					verbose(env, "direct value offset of %u is not allowed\n", off);
+ 					return -EINVAL;
+ 				}
+ 
+-- 
+2.49.0
+
