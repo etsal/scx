@@ -253,29 +253,8 @@ enum layer_match_kind {
 	MATCH_CGROUP_PREFIX,
 	MATCH_COMM_PREFIX,
 	MATCH_PCOMM_PREFIX,
-	MATCH_NICE_ABOVE,
-	MATCH_NICE_BELOW,
-	MATCH_NICE_EQUALS,
-	MATCH_USER_ID_EQUALS,
-	MATCH_GROUP_ID_EQUALS,
-	MATCH_PID_EQUALS,
-	MATCH_PPID_EQUALS,
-	MATCH_TGID_EQUALS,
-	MATCH_NSPID_EQUALS,
-	MATCH_NS_EQUALS,
-	MATCH_SCXCMD_JOIN,
-	MATCH_IS_GROUP_LEADER,
-	MATCH_IS_KTHREAD,
-	MATCH_USED_GPU_TID,
 	MATCH_USED_GPU_PID,
-	MATCH_AVG_RUNTIME,
-	MATCH_CGROUP_SUFFIX,
-	MATCH_CGROUP_CONTAINS,
-	MATCH_CGROUP_REGEX,
-	MATCH_HINT_EQUALS,
-	MATCH_SYSTEM_CPU_UTIL_BELOW,
-	MATCH_DSQ_INSERT_BELOW,
-	MATCH_NUMA_NODE,
+	MATCH_IS_GROUP_LEADER,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -283,29 +262,10 @@ enum layer_match_kind {
 struct layer_match {
 	int		kind;
 	char		cgroup_prefix[MAX_PATH];
-	char		cgroup_suffix[MAX_PATH];
-	char		cgroup_substr[MAX_PATH];
-	u32		cgroup_regex_id;
 	char		comm_prefix[MAX_COMM];
 	char		pcomm_prefix[MAX_COMM];
-	int		nice;
-	u32		user_id;
-	u32		group_id;
-	u32		pid;
-	u32		ppid;
-	u32		tgid;
-	u64		nsid;
-	bool		is_group_leader;
-	bool		is_kthread;
-	bool		used_gpu_tid;
 	bool		used_gpu_pid;
-	bool		exclude;
-	u64		min_avg_runtime_us;
-	u64		max_avg_runtime_us;
-	u64		hint;
-	u64		system_cpu_util_below;	/* ratio * 10000 */
-	u64		dsq_insert_below;	/* ratio * 10000 */
-	u32		numa_node_id;
+	bool		is_group_leader;
 };
 
 struct layer_match_ands {

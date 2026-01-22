@@ -66,7 +66,6 @@ volatile u64 layer_refresh_seq_avgruntime;
 const volatile bool enable_antistall = true;
 const volatile bool enable_match_debug = false;
 const volatile bool enable_gpu_support = false;
-const volatile u32 nr_cgroup_regexes = 0;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
@@ -120,12 +119,6 @@ const volatile bool task_hint_map_enabled;
 /* EWMA value updated from userspace */
 u64 system_cpu_util_ewma = 0;
 u64 layer_dsq_insert_ewma[MAX_LAYERS];
-
-static inline s32 prio_to_nice(s32 static_prio)
-{
-	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
-	return static_prio - 120;
-}
 
 static inline bool is_percpu_kthread(struct task_struct *p)
 {
@@ -273,14 +266,6 @@ struct {
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tid SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u64);
-	__type(value, u64);
-	__uint(max_entries, 16384);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} cgroup_match_bitmap SEC(".maps");
 
 // XXX - Converting this to bss array triggers verifier bugs. See
 // BpfStats::read(). Should also be cacheline aligned which doesn't work with
@@ -2479,241 +2464,63 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 static __noinline bool match_one(struct layer *layer, struct layer_match *match, struct task_ctx *taskc,
 				 struct task_struct *p, const char *cgrp_path)
 {
-	bool result = false;
-	const struct cred *cred;
-
 	switch (match->kind) {
 	case MATCH_CGROUP_PREFIX: {
-		return match_str(match->cgroup_prefix, cgrp_path, STR_PREFIX);
-	}
-	case MATCH_CGROUP_SUFFIX: {
-		return match_str(match->cgroup_suffix, cgrp_path, STR_SUFFIX);
-	}
-	case MATCH_CGROUP_CONTAINS: {
-		return match_str(match->cgroup_substr, cgrp_path, STR_SUBSTR);
-	}
-	case MATCH_CGROUP_REGEX: {
-		u64 cgroup_id = p->cgroups->dfl_cgrp->kn->id;
-		u64 *bitmap_ptr;
-
-		bitmap_ptr = bpf_map_lookup_elem(&cgroup_match_bitmap, &cgroup_id);
-		if (!bitmap_ptr)
-			return false;
-
-		return *bitmap_ptr & (1ULL << match->cgroup_regex_id);
+		return match_prefix(match->cgroup_prefix, cgrp_path);
 	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
 		__builtin_memcpy(comm, p->comm, MAX_COMM);
-		return match_str(match->comm_prefix, comm, STR_PREFIX);
+		return match_prefix(match->comm_prefix, comm);
 	}
 	case MATCH_PCOMM_PREFIX: {
 		char pcomm[MAX_COMM];
 
 		__builtin_memcpy(pcomm, p->group_leader->comm, MAX_COMM);
-		return match_str(match->pcomm_prefix, pcomm, STR_PREFIX);
+		return match_prefix(match->pcomm_prefix, pcomm);
 	}
-	case MATCH_NICE_ABOVE:
-		return prio_to_nice((s32)p->static_prio) > match->nice;
-	case MATCH_NICE_BELOW:
-		return prio_to_nice((s32)p->static_prio) < match->nice;
-	case MATCH_NICE_EQUALS:
-		return prio_to_nice((s32)p->static_prio) == match->nice;
-	case MATCH_USER_ID_EQUALS:
-		bpf_rcu_read_lock();
-		cred = p->real_cred;
-		if (cred)
-			result = cred->euid.val == match->user_id;
-		bpf_rcu_read_unlock();
-		return result;
-	case MATCH_GROUP_ID_EQUALS:
-		bpf_rcu_read_lock();
-		cred = p->real_cred;
-		if (cred)
-			result = cred->egid.val == match->group_id;
-		bpf_rcu_read_unlock();
-		return result;
-	case MATCH_PID_EQUALS:
-		return p->pid == match->pid;
-	case MATCH_PPID_EQUALS:
-		return p->real_parent->pid == match->ppid;
-	case MATCH_TGID_EQUALS:
-		return p->tgid == match->tgid;
-	case MATCH_NSPID_EQUALS: {
-		// To do namespace pid matching we need to translate the root
-		// pid from bpf side to the namespace pid.
-		bpf_rcu_read_lock();
-		struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
-		struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
-		if (!p_pid || !pid_ns) {
-			bpf_rcu_read_unlock();
-			return result;
-		}
-		pid_t nspid = get_pid_nr_ns(p_pid, pid_ns);
-		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
-		bpf_rcu_read_unlock();
-		return (u32)nspid == match->pid && nsid == match->nsid;
-	}
-	case MATCH_NS_EQUALS: {
-		bpf_rcu_read_lock();
-		struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
-		struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
-		if (!p_pid || !pid_ns) {
-			bpf_rcu_read_unlock();
-			return result;
-		}
-		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
-		bpf_rcu_read_unlock();
-		return nsid == match->nsid;
-	}
-	case MATCH_SCXCMD_JOIN: {
-		struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
-		if (!taskc) {
-			scx_bpf_error("could not find task");
-			return false;
+	case MATCH_USED_GPU_PID: {
+		u32 key = p->tgid;
+		bool must_be_used = match->used_gpu_pid;
+		u64 now = scx_bpf_now();
+		bool recently_used;
+		u64 *last_used;
+
+		if (!enable_gpu_support)
+			scx_bpf_error("UsedGpuPid requires --enable_gpu_support");
+
+		last_used = bpf_map_lookup_elem(&gpu_tgid, &key);
+
+		/* If not found, we want the used predicate to be required false. */
+		if (!last_used || *last_used == MEMBER_INVALID)
+			return !must_be_used;
+
+		/*
+		 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
+		 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
+		 *
+		 * NOTE: member_expire_ms=0 means "never expire", so skip the expiration check.
+		 */
+		recently_used = true;
+		if (layer->member_expire_ms > 0 && taskc &&
+			taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
+			taskc->recheck_layer_membership != MEMBER_CANTMATCH &&
+			(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
+
+			recently_used = false;
+			taskc->recheck_layer_membership = MEMBER_EXPIRED;
 		}
 
-		/* The empty string means "no join command". */
-		if (!taskc->join_layer[0])
-			return false;
-
-		return match_str(match->comm_prefix, taskc->join_layer,
-			STR_PREFIX);
+		return recently_used == must_be_used;
 	}
 	case MATCH_IS_GROUP_LEADER: {
 		// There is nuance to this around exec(2)s and group leader swaps.
 		// See https://github.com/sched-ext/scx/issues/610 for more details.
 		return (p->tgid == p->pid) == match->is_group_leader;
 	}
-	case MATCH_IS_KTHREAD:
-		return p->flags & PF_KTHREAD;
-
-	case MATCH_USED_GPU_TID:
-	case MATCH_USED_GPU_PID: {
-			u32 key = (match->kind == MATCH_USED_GPU_TID) ? p->pid : p->tgid;
-			bool must_be_used = (match->kind == MATCH_USED_GPU_TID) ? match->used_gpu_tid : match->used_gpu_pid;
-			u64 now = scx_bpf_now();
-			bool recently_used;
-			u64 *last_used;
-
-			if (!enable_gpu_support)
-				scx_bpf_error("UsedGpuPid requires --enable_gpu_support");
-
-			if (match->kind == MATCH_USED_GPU_TID)
-				last_used = bpf_map_lookup_elem(&gpu_tid, &key);
-			else
-				last_used = bpf_map_lookup_elem(&gpu_tgid, &key);
-
-			/* If not found, we want the used predicate to be required false. */
-			if (!last_used || *last_used == MEMBER_INVALID)
-				return !must_be_used;
-
-			/*
-			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
-			 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
-			 *
-			 * NOTE: member_expire_ms=0 means "never expire", so skip the expiration check.
-			 */
-			recently_used = true;
-			if (layer->member_expire_ms > 0 && taskc &&
-				taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
-				taskc->recheck_layer_membership != MEMBER_CANTMATCH &&
-				(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
-
-				recently_used = false;
-				taskc->recheck_layer_membership = MEMBER_EXPIRED;
-			}
-
-			return recently_used == must_be_used;
-	}
-	case MATCH_AVG_RUNTIME: {
-			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
-			if (!taskc) {
-				scx_bpf_error("could not find task");
-				return false;
-			}
-
-			u64 avg_runtime_us = taskc->runtime_avg / 1000;
-
-			if (!taskc) {
-				scx_bpf_error("could not find task");
-				return false;
-			}
-
-			/* To match, we must get min <= time < max. */
-			return match->min_avg_runtime_us <= avg_runtime_us &&
-				avg_runtime_us < match->max_avg_runtime_us;
-	}
-	case MATCH_HINT_EQUALS: {
-		struct task_hint *hint = lookup_task_hint(p);
-
-		if (!hint)
-			return false;
-		return match->hint == hint->hint;
-	}
-	case MATCH_SYSTEM_CPU_UTIL_BELOW: {
-		struct task_hint *hint;
-		struct hint_layer_info *info;
-		u32 hint_val;
-
-		hint = lookup_task_hint(p);
-		if (!hint)
-			return false;
-
-		hint_val = hint->hint;
-		info = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
-		if (!info)
-			return false;
-
-		/* Check if this matcher is enabled for this hint */
-		if (info->system_cpu_util_below == (u64)-1)
-			return false;
-
-		return system_cpu_util_ewma < info->system_cpu_util_below;
-	}
-	case MATCH_DSQ_INSERT_BELOW: {
-		struct task_hint *hint;
-		struct hint_layer_info *info;
-		u32 hint_val;
-
-		hint = lookup_task_hint(p);
-		if (!hint)
-			return false;
-
-		hint_val = hint->hint;
-		info = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
-		if (!info)
-			return false;
-
-		/* Check if this matcher is enabled for this hint */
-		if (info->dsq_insert_below == (u64)-1)
-			return false;
-
-		/* Check per-layer DSQ insertion ratio */
-		if (layer->id >= MAX_LAYERS)
-			return false;
-
-		return layer_dsq_insert_ewma[layer->id] < info->dsq_insert_below;
-	}
-	case MATCH_NUMA_NODE: {
-		struct node_ctx *nodec;
-		const struct cpumask *node_cpumask;
-
-		/* Get the NUMA node context */
-		if (!(nodec = lookup_node_ctx(match->numa_node_id)))
-			return false;
-
-		/* Get the node's CPU mask */
-		if (!(node_cpumask = cast_mask(nodec->cpumask)))
-			return false;
-
-		/* Check if task's affinity is a subset of the NUMA node's CPUs */
-		return bpf_cpumask_subset(p->cpus_ptr, node_cpumask);
-	}
-
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
-		return result;
+		return false;
 	}
 }
 
@@ -2757,12 +2564,12 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 				return -EINVAL;
 
 			match = &ands->matches[and_id];
-			if (!(match_one(layer, match, taskc, p, cgrp_path) == !match->exclude)) {
+			if (!match_one(layer, match, taskc, p, cgrp_path)) {
 				matched = false;
 				break;
 			}
 
-			if (match->kind == MATCH_USED_GPU_TID || match->kind == MATCH_USED_GPU_PID)
+			if (match->kind == MATCH_USED_GPU_PID)
 				matched_gpu = true;
 		}
 
@@ -2847,27 +2654,7 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 	if (!taskc->refresh_layer)
 		return;
 
-	/*
-	 * If cgroup regex matching is configured, check if the cgroup bitmap
-	 * entry is ready. If not, return without clearing refresh_layer so we
-	 * can retry later once userspace populates the map. However, if the
-	 * task's layer_id is MAX_LAYERS (initial assignment not done), proceed
-	 * anyway as the task can't stay unassigned.
-	 */
-	bool cgroup_entry_ready = true;
-
-	if (nr_cgroup_regexes > 0) {
-		u64 cgroup_id = p->cgroups->dfl_cgrp->kn->id;
-
-		if (!bpf_map_lookup_elem(&cgroup_match_bitmap, &cgroup_id))
-			cgroup_entry_ready = false;
-	}
-
-	if (!cgroup_entry_ready && taskc->layer_id != MAX_LAYERS)
-		return;
-
-	if (cgroup_entry_ready)
-		taskc->refresh_layer = false;
+	taskc->refresh_layer = false;
 	taskc->layer_refresh_seq = layer_refresh_seq_avgruntime;
 
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
@@ -3866,77 +3653,11 @@ static s32 init_layer(int layer_id)
 			case MATCH_PCOMM_PREFIX:
 				dbg("%s PCOMM_PREFIX \"%s\"", header, match->pcomm_prefix);
 				break;
-			case MATCH_NICE_ABOVE:
-				dbg("%s NICE_ABOVE %d", header, match->nice);
-				break;
-			case MATCH_NICE_BELOW:
-				dbg("%s NICE_BELOW %d", header, match->nice);
-				break;
-			case MATCH_NICE_EQUALS:
-				dbg("%s NICE_EQUALS %d", header, match->nice);
-				break;
-			case MATCH_USER_ID_EQUALS:
-				dbg("%s USER_ID %u", header, match->user_id);
-				break;
-			case MATCH_GROUP_ID_EQUALS:
-				dbg("%s GROUP_ID %u", header, match->group_id);
-				break;
-			case MATCH_PID_EQUALS:
-				dbg("%s PID %u", header, match->pid);
-				break;
-			case MATCH_PPID_EQUALS:
-				dbg("%s PPID %u", header, match->ppid);
-				break;
-			case MATCH_TGID_EQUALS:
-				dbg("%s TGID %u", header, match->tgid);
-				break;
-			case MATCH_NSPID_EQUALS:
-				dbg("%s NSID %lld PID %d",
-				    header, match->nsid, match->pid);
-				break;
-			case MATCH_NS_EQUALS:
-				dbg("%s NSID %lld", header, match->nsid);
-				break;
-			case MATCH_SCXCMD_JOIN:
-				dbg("%s SCXCMD_JOIN \"%s\"", header, match->comm_prefix);
-				break;
-			case MATCH_IS_GROUP_LEADER:
-				dbg("%s IS_GROUP_LEADER %d", header, match->is_group_leader);
-				break;
-			case MATCH_IS_KTHREAD:
-				dbg("%s IS_KTHREAD %d", header, match->is_kthread);
-				break;
-			case MATCH_USED_GPU_TID:
-				dbg("%s GPU_TID %d", header, match->used_gpu_tid);
-				break;
 			case MATCH_USED_GPU_PID:
 				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
 				break;
-			case MATCH_AVG_RUNTIME:
-				layer->periodically_refresh = true;
-				dbg("%s AVG_RUNTIME [%lluus, %lluus)", header,
-					match->min_avg_runtime_us,
-					match->max_avg_runtime_us);
-			case MATCH_CGROUP_SUFFIX:
-				dbg("%s CGROUP_SUFFIX \"%s\"", header, match->cgroup_suffix);
-				break;
-			case MATCH_CGROUP_CONTAINS:
-				dbg("%s CGROUP_CONTAINS \"%s\"", header, match->cgroup_substr);
-				break;
-			case MATCH_CGROUP_REGEX:
-				dbg("%s CGROUP_REGEX %d", header, match->cgroup_regex_id);
-				break;
-			case MATCH_HINT_EQUALS:
-				dbg("%s HINT_EQUALS %d", header, match->hint);
-				break;
-			case MATCH_SYSTEM_CPU_UTIL_BELOW:
-				dbg("%s SYSTEM_CPU_UTIL_BELOW %llu", header, match->system_cpu_util_below);
-				break;
-			case MATCH_DSQ_INSERT_BELOW:
-				dbg("%s DSQ_INSERT_BELOW %llu", header, match->dsq_insert_below);
-				break;
-			case MATCH_NUMA_NODE:
-				dbg("%s MATCH_NUMA_NODE %llu", header, match->numa_node_id);
+			case MATCH_IS_GROUP_LEADER:
+				dbg("%s IS_GROUP_LEADER %d", header, match->is_group_leader);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

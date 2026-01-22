@@ -91,10 +91,10 @@ __hidden __noinline int clamp_pathind(int i)
 	return i > 0 ? i % MAX_PATH : 0;
 }
 
-bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool match_suffix)
+bool __noinline match_prefix(const char *prefix, const char *str)
 {
 	u32 c, zero = 0;
-	int str_len, match_str_len, offset, i;
+	int str_len, prefix_len;
 
 	if (!prefix || !str) {
 		scx_bpf_error("invalid args: %s %s",
@@ -109,8 +109,8 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 		return false;
 	}
 
-	match_str_len = bpf_probe_read_kernel_str(match_buf, MAX_PATH, prefix);
-	if (match_str_len < 0) {
+	prefix_len = bpf_probe_read_kernel_str(match_buf, MAX_PATH, prefix);
+	if (prefix_len < 0) {
 		scx_bpf_error("failed to read prefix");
 		return false;
 	}
@@ -121,93 +121,15 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 		return false;
 	}
 
-	if (match_str_len > str_len)
+	if (prefix_len > str_len)
 		return false;
 
-	offset = 0;
-
-	if (match_suffix)
-		offset = str_len - match_str_len;
-
-	// use MAX_PATH instead of str_len for when
-	// prefix/suffix == string.
-	bpf_for(c, offset, MAX_PATH) {
-		i = c - offset;
-
-		if (match_buf[clamp_pathind(i)] == '\0')
+	bpf_for(c, 0, MAX_PATH) {
+		if (match_buf[clamp_pathind(c)] == '\0')
 			return true;
 
-		if (str_buf[clamp_pathind(c)] != match_buf[clamp_pathind(i)])
+		if (str_buf[clamp_pathind(c)] != match_buf[clamp_pathind(c)])
 			return false;
 	}
-	return false;
-}
-
-// Copied from above for verifier.
-bool __noinline match_substr(const char *prefix, const char *str)
-{
-	u32 zero = 0;
-	int str_len, match_str_len, x, y;
-
-	if (!prefix || !str) {
-		scx_bpf_error("invalid args: %s %s",
-			      prefix, str);
-		return false;
-	}
-
-	char *match_buf = bpf_map_lookup_elem(&match_bufs, &zero);
-	char *str_buf = bpf_map_lookup_elem(&str_bufs, &zero);
-	if (!match_buf || !str_buf) {
-		scx_bpf_error("failed to look up buf");
-		return false;
-	}
-
-	match_str_len = bpf_probe_read_kernel_str(match_buf, MAX_PATH, prefix);
-	if (match_str_len < 0) {
-		scx_bpf_error("failed to read prefix");
-		return false;
-	}
-
-	str_len = bpf_probe_read_kernel_str(str_buf, MAX_PATH, str);
-	if (str_len < 0) {
-		scx_bpf_error("failed to read str");
-		return false;
-	}
-
-	if (match_str_len > str_len)
-		return false;
-
-	bpf_for(x, 0, MAX_PATH) {
-		if (str_len - x < y)
-			break;
-
-		bpf_for(y, 0, MAX_PATH) {
-			if (match_buf[clamp_pathind(y)] == '\0')
-				return true;
-			if (str_buf[clamp_pathind(x+y)] != match_buf[clamp_pathind(y)])
-				break;
-		}
-	}
-	return false;
-}
-
-bool __noinline match_str(const char *prefix, const char *str, enum MatchType match_type)
-{
-
-	switch (match_type) {
-		case STR_PREFIX:
-			return match_prefix_suffix(prefix, str, false);
-			break;
-		case STR_SUFFIX:
-			return match_prefix_suffix(prefix, str, true);
-			break;
-		case STR_SUBSTR:
-			return match_substr(prefix, str);
-			break;
-		default:
-			scx_bpf_error("match_str w/o match type specified");
-			return false;
-	}
-
 	return false;
 }

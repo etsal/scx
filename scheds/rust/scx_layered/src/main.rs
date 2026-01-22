@@ -13,8 +13,6 @@ use std::fs;
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::ops::Sub;
-use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,9 +20,7 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
-use inotify::{Inotify, WatchMask};
 use libc;
-use std::os::unix::io::AsRawFd;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -32,7 +28,6 @@ use anyhow::Context;
 use anyhow::Result;
 pub use bpf_skel::*;
 use clap::Parser;
-use crossbeam::channel::Receiver;
 use crossbeam::select;
 use lazy_static::lazy_static;
 use libbpf_rs::libbpf_sys;
@@ -44,7 +39,6 @@ use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
-use regex::Regex;
 use scx_bpf_compat;
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
@@ -121,12 +115,10 @@ lazy_static! {
         specs: vec![
             LayerSpec {
                 name: "batch".into(),
-                comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
+                comment: Some("tasks under system.slice".into()),
                 cpuset: None,
-                template: None,
                 matches: vec![
                     vec![LayerMatch::CgroupPrefix("system.slice/".into())],
-                    vec![LayerMatch::NiceAbove(0)],
                 ],
                 kind: LayerKind::Confined {
                     util_range: (0.8, 0.9),
@@ -162,12 +154,10 @@ lazy_static! {
             },
             LayerSpec {
                 name: "immediate".into(),
-                comment: Some("tasks under workload.slice with nice value < 0".into()),
+                comment: Some("tasks under workload.slice".into()),
                 cpuset: None,
-                template: None,
                 matches: vec![vec![
                     LayerMatch::CgroupPrefix("workload.slice/".into()),
-                    LayerMatch::NiceBelow(0),
                 ]],
                 kind: LayerKind::Open {
                     common: LayerCommon {
@@ -200,7 +190,6 @@ lazy_static! {
                 name: "stress-ng".into(),
                 comment: Some("stress-ng test layer".into()),
                 cpuset: None,
-                template: None,
                 matches: vec![
                     vec![LayerMatch::CommPrefix("stress-ng".into()),],
                     vec![LayerMatch::PcommPrefix("stress-ng".into()),]
@@ -241,7 +230,6 @@ lazy_static! {
                 name: "normal".into(),
                 comment: Some("the rest".into()),
                 cpuset: None,
-                template: None,
                 matches: vec![vec![]],
                 kind: LayerKind::Grouped {
                     cpus_range: None,
@@ -302,9 +290,6 @@ lazy_static! {
 ///     [
 ///       {
 ///         "CommPrefix": "fbagent"
-///       },
-///       {
-///         "NiceAbove": 0
 ///       }
 ///     ]
 ///   ],
@@ -314,7 +299,7 @@ lazy_static! {
 ///
 /// - Tasks which are in the cgroup sub-hierarchy under "system.slice".
 ///
-/// - Or tasks whose comm starts with "fbagent" and have a nice value > 0.
+/// - Or tasks whose comm starts with "fbagent".
 ///
 /// Currently, the following matches are supported:
 ///
@@ -328,77 +313,11 @@ lazy_static! {
 ///
 /// - PcommPrefix: Matches the task's thread group leader's comm prefix.
 ///
-/// - NiceAbove: Matches if the task's nice value is greater than the
-///   pattern.
-///
-/// - NiceBelow: Matches if the task's nice value is smaller than the
-///   pattern.
-///
-/// - NiceEquals: Matches if the task's nice value is exactly equal to
-///   the pattern.
-///
-/// - UIDEquals: Matches if the task's effective user id matches the value
-///
-/// - GIDEquals: Matches if the task's effective group id matches the value.
-///
-/// - PIDEquals: Matches if the task's pid matches the value.
-///
-/// - PPIDEquals: Matches if the task's ppid matches the value.
-///
-/// - TGIDEquals: Matches if the task's tgid matches the value.
-///
-/// - NSPIDEquals: Matches if the task's namespace id and pid matches the values.
-///
-/// - NSEquals: Matches if the task's namespace id matches the values.
-///
-/// - IsGroupLeader: Bool. When true, matches if the task is group leader
-///   (i.e. PID == TGID), aka the thread from which other threads are made.
-///   When false, matches if the task is *not* the group leader (i.e. the rest).
-///
-/// - CmdJoin: Matches when the task uses pthread_setname_np to send a join/leave
-/// command to the scheduler. See examples/cmdjoin.c for more details.
-///
-/// - UsedGpuTid: Bool. When true, matches if the tasks which have used
-///   gpus by tid.
-///
 /// - UsedGpuPid: Bool. When true, matches if the tasks which have used gpu
 ///   by tgid/pid.
 ///
-/// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
-///   is within the provided values [min, max).
-///
-/// - HintEquals: u64. Match tasks whose hint value equals this value.
-///   The value must be in the range [0, 1024].
-///
-/// - SystemCpuUtilBelow: f64. Match when the system CPU utilization fraction
-///   is below the specified threshold (a value in the range [0.0, 1.0]). This
-///   option can only be used in conjunction with HintEquals.
-///
-/// - DsqInsertBelow: f64. Match when the layer DSQ insertion fraction is below
-///   the specified threshold (a value in the range [0.0, 1.0]). This option can
-///   only be used in conjunction with HintEquals.
-///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
-///
-/// Templates
-/// ---------
-///
-/// Templates let us create a variable number of layers dynamically at initialization
-/// time out of a cgroup name suffix/prefix. Sometimes we know there are multiple
-/// applications running on a machine, each with their own cgroup but do not know the
-/// exact names of the applications or cgroups, e.g., in cloud computing contexts where
-/// workloads are placed on machines dynamically and run under cgroups whose name is
-/// autogenerated. In that case, we cannot hardcode the cgroup match rules when writing
-/// the configuration. We thus cannot easily prevent tasks from different cgroups from
-/// falling into the same layer and affecting each other's performance.
-///
-///
-/// Templates offer a solution to this problem by generating one layer for each such cgroup,
-/// provided these cgroups share a suffix, and that the suffix is unique to them. Templates
-/// have a cgroup suffix rule that we use to find the relevant cgroups in the system. For each
-/// such cgroup, we copy the layer config and add a matching rule that matches just this cgroup.
-///
 ///
 /// Policies
 /// ========
@@ -756,20 +675,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-// Cgroup event types for inter-thread communication
-#[derive(Debug, Clone)]
-enum CgroupEvent {
-    Created {
-        path: String,
-        cgroup_id: u64,    // inode number
-        match_bitmap: u64, // bitmap of matched regex rules
-    },
-    Removed {
-        path: String,
-        cgroup_id: u64, // inode number
-    },
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -1435,7 +1340,6 @@ impl Layer {
         Ok(Self {
             name: name.into(),
             kind,
-            growth_algo: layer_growth_algo,
             core_order: core_order.clone(),
 
             nr_cpus: 0,
@@ -1718,8 +1622,6 @@ struct Scheduler<'a> {
     proc_reader: fb_procfs::ProcReader,
     sched_stats: Stats,
 
-    cgroup_regexes: Option<HashMap<u32, Regex>>,
-
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
@@ -1734,14 +1636,12 @@ impl<'a> Scheduler<'a> {
         skel: &mut OpenBpfSkel,
         specs: &[LayerSpec],
         topo: &Topology,
-    ) -> Result<HashMap<u32, Regex>> {
+    ) -> Result<()> {
         skel.maps.rodata_data.as_mut().unwrap().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
         let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
         let mut layer_weights: Vec<usize> = vec![];
-        let mut cgroup_regex_id = 0;
-        let mut cgroup_regexes = HashMap::new();
 
         for (spec_i, spec) in specs.iter().enumerate() {
             let layer = &mut skel.maps.bss_data.as_mut().unwrap().layers[spec_i];
@@ -1750,147 +1650,26 @@ impl<'a> Scheduler<'a> {
                 for (and_i, and) in or.iter().enumerate() {
                     let mt = &mut layer.matches[or_i].matches[and_i];
 
-                    // Rules are allowlist-based by default
-                    mt.exclude.write(false);
-
                     match and {
                         LayerMatch::CgroupPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_PREFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_prefix, prefix.as_str());
                         }
-                        LayerMatch::CgroupSuffix(suffix) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
-                            copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
-                        }
-                        LayerMatch::CgroupRegex(regex_str) => {
-                            if cgroup_regex_id >= bpf_intf::consts_MAX_CGROUP_REGEXES {
-                                bail!(
-                                    "Too many cgroup regex rules. Maximum allowed: {}",
-                                    bpf_intf::consts_MAX_CGROUP_REGEXES
-                                );
-                            }
-
-                            // CgroupRegex matching handled in userspace via cgroup watcher
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_REGEX as i32;
-                            mt.cgroup_regex_id = cgroup_regex_id;
-
-                            let regex = Regex::new(regex_str).with_context(|| {
-                                format!("Invalid regex '{}' in layer '{}'", regex_str, spec.name)
-                            })?;
-                            cgroup_regexes.insert(cgroup_regex_id, regex);
-                            cgroup_regex_id += 1;
-                        }
-                        LayerMatch::CgroupContains(substr) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
-                            copy_into_cstr(&mut mt.cgroup_substr, substr.as_str());
-                        }
                         LayerMatch::CommPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
-                            copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
-                        }
-                        LayerMatch::CommPrefixExclude(prefix) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
-                            mt.exclude.write(true);
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
                         }
                         LayerMatch::PcommPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
                         }
-                        LayerMatch::PcommPrefixExclude(prefix) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
-                            mt.exclude.write(true);
-                            copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
-                        }
-                        LayerMatch::NiceAbove(nice) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_ABOVE as i32;
-                            mt.nice = *nice;
-                        }
-                        LayerMatch::NiceBelow(nice) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_BELOW as i32;
-                            mt.nice = *nice;
-                        }
-                        LayerMatch::NiceEquals(nice) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_EQUALS as i32;
-                            mt.nice = *nice;
-                        }
-                        LayerMatch::UIDEquals(user_id) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_USER_ID_EQUALS as i32;
-                            mt.user_id = *user_id;
-                        }
-                        LayerMatch::GIDEquals(group_id) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_GROUP_ID_EQUALS as i32;
-                            mt.group_id = *group_id;
-                        }
-                        LayerMatch::PIDEquals(pid) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_PID_EQUALS as i32;
-                            mt.pid = *pid;
-                        }
-                        LayerMatch::PPIDEquals(ppid) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_PPID_EQUALS as i32;
-                            mt.ppid = *ppid;
-                        }
-                        LayerMatch::TGIDEquals(tgid) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_TGID_EQUALS as i32;
-                            mt.tgid = *tgid;
-                        }
-                        LayerMatch::NSPIDEquals(nsid, pid) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_NSPID_EQUALS as i32;
-                            mt.nsid = *nsid;
-                            mt.pid = *pid;
-                        }
-                        LayerMatch::NSEquals(nsid) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_NS_EQUALS as i32;
-                            mt.nsid = *nsid as u64;
-                        }
-                        LayerMatch::CmdJoin(joincmd) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_SCXCMD_JOIN as i32;
-                            copy_into_cstr(&mut mt.comm_prefix, joincmd);
-                        }
-                        LayerMatch::IsGroupLeader(polarity) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
-                            mt.is_group_leader.write(*polarity);
-                        }
-                        LayerMatch::IsKthread(polarity) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_IS_KTHREAD as i32;
-                            mt.is_kthread.write(*polarity);
-                        }
-                        LayerMatch::UsedGpuTid(polarity) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_TID as i32;
-                            mt.used_gpu_tid.write(*polarity);
-                        }
                         LayerMatch::UsedGpuPid(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_PID as i32;
                             mt.used_gpu_pid.write(*polarity);
                         }
-                        LayerMatch::AvgRuntime(min, max) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
-                            mt.min_avg_runtime_us = *min;
-                            mt.max_avg_runtime_us = *max;
-                        }
-                        LayerMatch::HintEquals(hint) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_HINT_EQUALS as i32;
-                            mt.hint = *hint;
-                        }
-                        LayerMatch::SystemCpuUtilBelow(threshold) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_SYSTEM_CPU_UTIL_BELOW as i32;
-                            mt.system_cpu_util_below = (*threshold * 10000.0) as u64;
-                        }
-                        LayerMatch::DsqInsertBelow(threshold) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_DSQ_INSERT_BELOW as i32;
-                            mt.dsq_insert_below = (*threshold * 10000.0) as u64;
-                        }
-                        LayerMatch::NumaNode(node_id) => {
-                            if *node_id as usize >= topo.nodes.len() {
-                                bail!(
-                                    "Spec {:?} has invalid NUMA node ID {} (available nodes: 0-{})",
-                                    spec.name,
-                                    node_id,
-                                    topo.nodes.len() - 1
-                                );
-                            }
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_NUMA_NODE as i32;
-                            mt.numa_node_id = *node_id;
+                        LayerMatch::IsGroupLeader(polarity) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
+                            mt.is_group_leader.write(*polarity);
                         }
                     }
                 }
@@ -2013,7 +1792,7 @@ impl<'a> Scheduler<'a> {
             warn!("cpufreq support not available, ignoring perf configurations");
         }
 
-        Ok(cgroup_regexes)
+        Ok(())
     }
 
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
@@ -2598,8 +2377,7 @@ impl<'a> Scheduler<'a> {
             rodata.enable_hi_fb_thread_name_match = true;
         }
 
-        let cgroup_regexes = Self::init_layers(&mut skel, &layer_specs, &topo)?;
-        skel.maps.rodata_data.as_mut().unwrap().nr_cgroup_regexes = cgroup_regexes.len() as u32;
+        Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -2720,7 +2498,6 @@ impl<'a> Scheduler<'a> {
 
             sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
 
-            cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
 
@@ -3236,249 +3013,12 @@ impl<'a> Scheduler<'a> {
         Ok(sys_stats)
     }
 
-    // Helper function to process a cgroup creation (common logic for walkdir and inotify)
-    fn process_cgroup_creation(
-        path: &Path,
-        cgroup_regexes: &HashMap<u32, Regex>,
-        cgroup_path_to_id: &mut HashMap<String, u64>,
-        sender: &crossbeam::channel::Sender<CgroupEvent>,
-    ) {
-        let path_str = path.to_string_lossy().to_string();
-
-        // Get cgroup ID (inode number)
-        let cgroup_id = std::fs::metadata(path)
-            .map(|metadata| {
-                use std::os::unix::fs::MetadataExt;
-                metadata.ino()
-            })
-            .unwrap_or(0);
-
-        // Build match bitmap by testing against CgroupRegex rules
-        let mut match_bitmap = 0u64;
-        for (rule_id, regex) in cgroup_regexes {
-            if regex.is_match(&path_str) {
-                match_bitmap |= 1u64 << rule_id;
-            }
-        }
-
-        // Store in hash
-        cgroup_path_to_id.insert(path_str.clone(), cgroup_id);
-
-        // Send event
-        if let Err(e) = sender.send(CgroupEvent::Created {
-            path: path_str,
-            cgroup_id,
-            match_bitmap,
-        }) {
-            error!("Failed to send cgroup creation event: {}", e);
-        }
-    }
-
-    fn start_cgroup_watcher(
-        shutdown: Arc<AtomicBool>,
-        cgroup_regexes: HashMap<u32, Regex>,
-    ) -> Result<Receiver<CgroupEvent>> {
-        let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
-        let mut wd_to_path = HashMap::new();
-
-        // Create crossbeam channel for cgroup events (bounded to prevent memory issues)
-        let (sender, receiver) = crossbeam::channel::bounded::<CgroupEvent>(1024);
-
-        // Watch for directory creation and deletion events
-        let root_wd = inotify
-            .watches()
-            .add("/sys/fs/cgroup", WatchMask::CREATE | WatchMask::DELETE)
-            .context("Failed to add watch for /sys/fs/cgroup")?;
-        wd_to_path.insert(root_wd, PathBuf::from("/sys/fs/cgroup"));
-
-        // Also recursively watch existing directories for new subdirectories
-        Self::add_recursive_watches(&mut inotify, &mut wd_to_path, Path::new("/sys/fs/cgroup"))?;
-
-        // Spawn watcher thread
-        std::thread::spawn(move || {
-            let mut buffer = [0; 4096];
-            let inotify_fd = inotify.as_raw_fd();
-            // Maintain hash of cgroup path -> cgroup ID (inode number)
-            let mut cgroup_path_to_id = HashMap::<String, u64>::new();
-
-            // Populate existing cgroups
-            for entry in WalkDir::new("/sys/fs/cgroup")
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_dir())
-            {
-                let path = entry.path();
-                Self::process_cgroup_creation(
-                    path,
-                    &cgroup_regexes,
-                    &mut cgroup_path_to_id,
-                    &sender,
-                );
-            }
-
-            while !shutdown.load(Ordering::Relaxed) {
-                // Use select to wait for events with a 100ms timeout
-                let ready = unsafe {
-                    let mut read_fds: libc::fd_set = std::mem::zeroed();
-                    libc::FD_ZERO(&mut read_fds);
-                    libc::FD_SET(inotify_fd, &mut read_fds);
-
-                    let mut timeout = libc::timeval {
-                        tv_sec: 0,
-                        tv_usec: 100_000, // 100ms
-                    };
-
-                    libc::select(
-                        inotify_fd + 1,
-                        &mut read_fds,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        &mut timeout,
-                    )
-                };
-
-                if ready <= 0 {
-                    // Timeout or error, continue loop to check shutdown
-                    continue;
-                }
-
-                // Read events non-blocking
-                let events = match inotify.read_events(&mut buffer) {
-                    Ok(events) => events,
-                    Err(e) => {
-                        error!("Error reading inotify events: {}", e);
-                        break;
-                    }
-                };
-
-                for event in events {
-                    if !event.mask.contains(inotify::EventMask::CREATE)
-                        && !event.mask.contains(inotify::EventMask::DELETE)
-                    {
-                        continue;
-                    }
-
-                    let name = match event.name {
-                        Some(name) => name,
-                        None => continue,
-                    };
-
-                    let parent_path = match wd_to_path.get(&event.wd) {
-                        Some(parent) => parent,
-                        None => {
-                            warn!("Unknown watch descriptor: {:?}", event.wd);
-                            continue;
-                        }
-                    };
-
-                    let path = parent_path.join(name.to_string_lossy().as_ref());
-
-                    if event.mask.contains(inotify::EventMask::CREATE) {
-                        if !path.is_dir() {
-                            continue;
-                        }
-
-                        Self::process_cgroup_creation(
-                            &path,
-                            &cgroup_regexes,
-                            &mut cgroup_path_to_id,
-                            &sender,
-                        );
-
-                        // Add watch for this new directory
-                        match inotify
-                            .watches()
-                            .add(&path, WatchMask::CREATE | WatchMask::DELETE)
-                        {
-                            Ok(wd) => {
-                                wd_to_path.insert(wd, path.clone());
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Failed to add watch for new cgroup {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        }
-                    } else if event.mask.contains(inotify::EventMask::DELETE) {
-                        let path_str = path.to_string_lossy().to_string();
-
-                        // Get cgroup ID from our hash (since the directory is gone, we can't stat it)
-                        let cgroup_id = cgroup_path_to_id.remove(&path_str).unwrap_or(0);
-
-                        // Send removal event to main thread
-                        if let Err(e) = sender.send(CgroupEvent::Removed {
-                            path: path_str,
-                            cgroup_id,
-                        }) {
-                            error!("Failed to send cgroup removal event: {}", e);
-                        }
-
-                        // Find and remove the watch descriptor for this path
-                        let wd_to_remove = wd_to_path.iter().find_map(|(wd, watched_path)| {
-                            if watched_path == &path {
-                                Some(wd.clone())
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(wd) = wd_to_remove {
-                            wd_to_path.remove(&wd);
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(receiver)
-    }
-
-    fn add_recursive_watches(
-        inotify: &mut Inotify,
-        wd_to_path: &mut HashMap<inotify::WatchDescriptor, PathBuf>,
-        path: &Path,
-    ) -> Result<()> {
-        for entry in WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_dir())
-            .skip(1)
-        {
-            let entry_path = entry.path();
-            // Add watch for this directory
-            match inotify
-                .watches()
-                .add(entry_path, WatchMask::CREATE | WatchMask::DELETE)
-            {
-                Ok(wd) => {
-                    wd_to_path.insert(wd, entry_path.to_path_buf());
-                }
-                Err(e) => {
-                    debug!("Failed to add watch for {}: {}", entry_path.display(), e);
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
         let enable_layer_refresh = !self.layer_refresh_intv.is_zero();
         let mut next_layer_refresh_at = Instant::now() + self.layer_refresh_intv;
         let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
-
-        // Start the cgroup watcher only if there are CgroupRegex rules
-        let cgroup_regexes = self.cgroup_regexes.take().unwrap();
-        let cgroup_event_rx = if !cgroup_regexes.is_empty() {
-            Some(Self::start_cgroup_watcher(
-                shutdown.clone(),
-                cgroup_regexes,
-            )?)
-        } else {
-            None
-        };
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -3502,10 +3042,8 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            // Handle both stats requests and cgroup events with timeout
+            // Handle stats requests with timeout
             let timeout_duration = next_sched_at.saturating_duration_since(Instant::now());
-            let never_rx = crossbeam::channel::never();
-            let cgroup_rx = cgroup_event_rx.as_ref().unwrap_or(&never_rx);
 
             select! {
                 recv(req_ch) -> msg => match msg {
@@ -3549,34 +3087,6 @@ impl<'a> Scheduler<'a> {
                     Err(e) => Err(e)?,
                 },
 
-                recv(cgroup_rx) -> event => match event {
-                    Ok(CgroupEvent::Created { path, cgroup_id, match_bitmap }) => {
-                        // Insert into BPF map
-                        self.skel.maps.cgroup_match_bitmap.update(
-                            &cgroup_id.to_ne_bytes(),
-                            &match_bitmap.to_ne_bytes(),
-                            libbpf_rs::MapFlags::ANY,
-                        ).with_context(|| format!(
-                            "Failed to insert cgroup {}({}) into BPF map. Cgroup map may be full \
-                             (max 16384 entries). Aborting.",
-                            cgroup_id, path
-                        ))?;
-
-                        debug!("Added cgroup {} to BPF map with bitmap 0x{:x}", cgroup_id, match_bitmap);
-                    }
-                    Ok(CgroupEvent::Removed { path, cgroup_id }) => {
-                        // Delete from BPF map
-                        if let Err(e) = self.skel.maps.cgroup_match_bitmap.delete(&cgroup_id.to_ne_bytes()) {
-                            warn!("Failed to delete cgroup {} from BPF map: {}", cgroup_id, e);
-                        } else {
-                            debug!("Removed cgroup {}({}) from BPF map", cgroup_id, path);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Error receiving cgroup event: {}", e);
-                    }
-                },
-
                 recv(crossbeam::channel::after(timeout_duration)) -> _ => {
                     // Timeout - continue main loop
                 }
@@ -3613,7 +3123,7 @@ struct HintLayerInfo {
 }
 
 fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>> {
-    let mut hint_to_layer_map = HashMap::<u64, (usize, String, Option<f64>, Option<f64>)>::new();
+    let hint_to_layer_map = HashMap::<u64, (usize, String, Option<f64>, Option<f64>)>::new();
 
     let nr_specs = specs.len();
     if nr_specs == 0 {
@@ -3651,27 +3161,11 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                     ands.len()
                 );
             }
-            let mut hint_equals_cnt = 0;
-            let mut system_cpu_util_below_cnt = 0;
-            let mut dsq_insert_below_cnt = 0;
-            let mut hint_value: Option<u64> = None;
-            let mut system_cpu_util_threshold: Option<f64> = None;
-            let mut dsq_insert_threshold: Option<f64> = None;
             for one in ands.iter() {
                 match one {
                     LayerMatch::CgroupPrefix(prefix) => {
                         if prefix.len() > MAX_PATH {
                             bail!("Spec {:?} has too long a cgroup prefix", spec.name);
-                        }
-                    }
-                    LayerMatch::CgroupSuffix(suffix) => {
-                        if suffix.len() > MAX_PATH {
-                            bail!("Spec {:?} has too long a cgroup suffix", spec.name);
-                        }
-                    }
-                    LayerMatch::CgroupContains(substr) => {
-                        if substr.len() > MAX_PATH {
-                            bail!("Spec {:?} has too long a cgroup substr", spec.name);
                         }
                     }
                     LayerMatch::CommPrefix(prefix) => {
@@ -3684,82 +3178,8 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                             bail!("Spec {:?} has too long a process name prefix", spec.name);
                         }
                     }
-                    LayerMatch::SystemCpuUtilBelow(threshold) => {
-                        if *threshold < 0.0 || *threshold > 1.0 {
-                            bail!(
-                                "Spec {:?} has SystemCpuUtilBelow threshold outside the range [0.0, 1.0]",
-                                spec.name
-                            );
-                        }
-                        system_cpu_util_threshold = Some(*threshold);
-                        system_cpu_util_below_cnt += 1;
-                    }
-                    LayerMatch::DsqInsertBelow(threshold) => {
-                        if *threshold < 0.0 || *threshold > 1.0 {
-                            bail!(
-                                "Spec {:?} has DsqInsertBelow threshold outside the range [0.0, 1.0]",
-                                spec.name
-                            );
-                        }
-                        dsq_insert_threshold = Some(*threshold);
-                        dsq_insert_below_cnt += 1;
-                    }
-                    LayerMatch::HintEquals(hint) => {
-                        if *hint > 1024 {
-                            bail!(
-                                "Spec {:?} has hint value outside the range [0, 1024]",
-                                spec.name
-                            );
-                        }
-                        hint_value = Some(*hint);
-                        hint_equals_cnt += 1;
-                    }
-                    _ => {}
-                }
-            }
-            if hint_equals_cnt > 1 {
-                bail!("Only 1 HintEquals match permitted per AND block");
-            }
-            let high_freq_matcher_cnt = system_cpu_util_below_cnt + dsq_insert_below_cnt;
-            if high_freq_matcher_cnt > 0 {
-                if hint_equals_cnt != 1 {
-                    bail!("High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals");
-                }
-                if system_cpu_util_below_cnt > 1 {
-                    bail!("Only 1 SystemCpuUtilBelow match permitted per AND block");
-                }
-                if dsq_insert_below_cnt > 1 {
-                    bail!("Only 1 DsqInsertBelow match permitted per AND block");
-                }
-                if ands.len() != hint_equals_cnt + system_cpu_util_below_cnt + dsq_insert_below_cnt
-                {
-                    bail!("High-frequency matchers must be used only with HintEquals (no other matchers)");
-                }
-            } else if hint_equals_cnt == 1 && ands.len() != 1 {
-                bail!("HintEquals match cannot be in conjunction with other matches");
-            }
-
-            // Insert hint into map if present
-            if let Some(hint) = hint_value {
-                if let Some((layer_id, name, _, _)) = hint_to_layer_map.get(&hint) {
-                    if *layer_id != idx {
-                        bail!(
-                            "Spec {:?} has hint value ({}) that is already mapped to Spec {:?}",
-                            spec.name,
-                            hint,
-                            name
-                        );
-                    }
-                } else {
-                    hint_to_layer_map.insert(
-                        hint,
-                        (
-                            idx,
-                            spec.name.clone(),
-                            system_cpu_util_threshold,
-                            dsq_insert_threshold,
-                        ),
-                    );
+                    LayerMatch::UsedGpuPid(_) => {}
+                    LayerMatch::IsGroupLeader(_) => {}
                 }
             }
         }
@@ -3811,84 +3231,6 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
             )
         })
         .collect())
-}
-
-fn name_suffix(cgroup: &str, len: usize) -> String {
-    let suffixlen = std::cmp::min(len, cgroup.len());
-    let suffixrev: String = cgroup.chars().rev().take(suffixlen).collect();
-
-    suffixrev.chars().rev().collect()
-}
-
-fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = vec![];
-
-    if !dir.is_dir() {
-        panic!("path {:?} does not correspond to directory", dir);
-    }
-
-    let direntries = fs::read_dir(dir)?;
-
-    for entry in direntries {
-        let path = entry?.path();
-        if path.is_dir() {
-            paths.append(&mut traverse_sysfs(&path)?);
-            paths.push(path);
-        }
-    }
-
-    Ok(paths)
-}
-
-fn find_cpumask(cgroup: &str) -> Cpumask {
-    let mut path = String::from(cgroup);
-    path.push_str("/cpuset.cpus.effective");
-
-    let description = fs::read_to_string(&mut path).unwrap();
-
-    Cpumask::from_cpulist(&description).unwrap()
-}
-
-fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
-    match rule {
-        LayerMatch::CgroupSuffix(suffix) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
-            .into_iter()
-            .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
-            .filter(|cgroup| cgroup.ends_with(suffix))
-            .map(|cgroup| {
-                (
-                    {
-                        let mut slashterminated = cgroup.clone();
-                        slashterminated.push('/');
-                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
-                    },
-                    find_cpumask(&cgroup),
-                )
-            })
-            .collect()),
-        LayerMatch::CgroupRegex(expr) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
-            .into_iter()
-            .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
-            .filter(|cgroup| {
-                let re = Regex::new(expr).unwrap();
-                re.is_match(cgroup)
-            })
-            .map(|cgroup| {
-                (
-                    // Here we convert the regex match into a suffix match because we still need to
-                    // do the matching on the bpf side and doing a regex match in bpf isn't
-                    // easily done.
-                    {
-                        let mut slashterminated = cgroup.clone();
-                        slashterminated.push('/');
-                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
-                    },
-                    find_cpumask(&cgroup),
-                )
-            })
-            .collect()),
-        _ => panic!("Unimplemented template enum {:?}", rule),
-    }
 }
 
 fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
@@ -4084,39 +3426,7 @@ fn main(opts: Opts) -> Result<()> {
             .context(format!("Failed to parse specs[{}] ({:?})", idx, input))?;
 
         for spec in specs {
-            match spec.template {
-                Some(ref rule) => {
-                    let matches = expand_template(&rule)?;
-                    // in the absence of matching cgroups, have template layers
-                    // behave as non-template layers do.
-                    if matches.is_empty() {
-                        layer_config.specs.push(spec);
-                    } else {
-                        for (mt, mask) in matches {
-                            let mut genspec = spec.clone();
-
-                            genspec.cpuset = Some(mask);
-
-                            // Push the new "and" rule into each "or" term.
-                            for orterm in &mut genspec.matches {
-                                orterm.push(mt.clone());
-                            }
-
-                            match &mt {
-                                LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
-                                _ => bail!("Template match has unexpected type"),
-                            }
-
-                            // Push the generated layer into the config
-                            layer_config.specs.push(genspec);
-                        }
-                    }
-                }
-
-                None => {
-                    layer_config.specs.push(spec);
-                }
-            }
+            layer_config.specs.push(spec);
         }
     }
 

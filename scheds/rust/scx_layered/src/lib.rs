@@ -7,8 +7,6 @@ mod layer_core_growth;
 
 pub mod bpf_intf;
 
-use std::collections::BTreeMap;
-
 use anyhow::bail;
 use anyhow::Result;
 use bitvec::prelude::*;
@@ -19,7 +17,6 @@ pub use config::LayerMatch;
 pub use config::LayerPlacement;
 pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
-use scx_utils::Core;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::NR_CPUS_POSSIBLE;
@@ -47,29 +44,12 @@ pub struct CpuPool {
     /// The ID of the next free CPU or the fallback CPU if none are available.
     /// This is used to allocate resources when a task needs to be assigned to a core.
     pub fallback_cpu: usize,
-
-    /// A mapping of node IDs to last-level cache (LLC) IDs.
-    /// The map allows for the identification of which last-level cache
-    /// corresponds to each CPU based on its core topology.
-    core_topology_to_id: BTreeMap<(usize, usize, usize), usize>,
 }
 
 impl CpuPool {
     pub fn new(topo: Arc<Topology>) -> Result<Self> {
         if *NR_CPU_IDS > MAX_CPUS {
             bail!("NR_CPU_IDS {} > MAX_CPUS {}", *NR_CPU_IDS, MAX_CPUS);
-        }
-
-        // Build core_topology_to_id
-        let mut core_topology_to_id = BTreeMap::new();
-        let mut next_topo_id: usize = 0;
-        for node in topo.nodes.values() {
-            for llc in node.llcs.values() {
-                for core in llc.cores.values() {
-                    core_topology_to_id.insert((core.node_id, core.llc_id, core.id), next_topo_id);
-                    next_topo_id += 1;
-                }
-            }
         }
 
         info!(
@@ -85,7 +65,6 @@ impl CpuPool {
             available_cores: bitvec![1; topo.all_cores.len()],
             first_cpu,
             fallback_cpu: first_cpu,
-            core_topology_to_id,
             topo,
         };
         cpu_pool.update_fallback_cpu();

@@ -26,7 +26,6 @@ pub struct LayerSpec {
     #[serde(skip)]
     pub cpuset: Option<Cpumask>,
     pub comment: Option<String>,
-    pub template: Option<LayerMatch>,
     pub matches: Vec<Vec<LayerMatch>>,
     pub kind: LayerKind,
 }
@@ -74,33 +73,10 @@ pub enum LayerPlacement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayerMatch {
     CgroupPrefix(String),
-    CgroupSuffix(String),
-    CgroupContains(String),
-    CgroupRegex(String),
     CommPrefix(String),
-    CommPrefixExclude(String),
     PcommPrefix(String),
-    PcommPrefixExclude(String),
-    NiceAbove(i32),
-    NiceBelow(i32),
-    NiceEquals(i32),
-    UIDEquals(u32),
-    GIDEquals(u32),
-    PIDEquals(u32),
-    PPIDEquals(u32),
-    TGIDEquals(u32),
-    NSPIDEquals(u64, u32),
-    NSEquals(u32),
-    CmdJoin(String),
-    IsGroupLeader(bool),
-    IsKthread(bool),
-    UsedGpuTid(bool),
     UsedGpuPid(bool),
-    AvgRuntime(u64, u64),
-    HintEquals(u64),
-    SystemCpuUtilBelow(f64),
-    DsqInsertBelow(f64),
-    NumaNode(u32),
+    IsGroupLeader(bool),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
