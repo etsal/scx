@@ -53,8 +53,6 @@ const volatile u32 nr_gp_layers;	/* grouped && preempt */
 const volatile u32 nr_gn_layers;	/* grouped && !preempt */
 const volatile u32 nr_excl_layers;
 const volatile bool kfuncs_supported_in_syscall = true;
-const volatile u64 min_open_layer_disallow_open_after_ns;
-const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
@@ -469,11 +467,6 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 				else if (cpuc->layer_id == layer_id) {
 					cpuc->layer_id = MAX_LAYERS;
 					cpuc->in_open_layers = true;
-
-					/* Belongs to no layer, so none of these hold. */
-					cpuc->protect_owned = false;
-					cpuc->protect_owned_preempt = false;
-
 				}
 				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 			}
@@ -1234,15 +1227,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	bpf_rcu_read_unlock();
 
 	/*
-	 * Don't preempt if protection against is in effect. However, open
-	 * layers share CPUs and using the same mechanism between non-preempt
-	 * and preempt open layers doesn't make sense. Exclude for now.
-	 */
-	if (cand_cpuc->protect_owned_preempt && cand_cpuc->running_owned &&
-	    !(layer->kind == LAYER_KIND_OPEN && cand_cpuc->running_open))
-		return false;
-
-	/*
 	 * If exclusive, we want to make sure the sibling CPU, if there's
 	 * one, is idle. However, if the sibling CPU is already running a
 	 * preempt task, we shouldn't kick it out.
@@ -1664,22 +1648,9 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 
 	check_member_expired(taskc, now);
 
-	/*
-	 * protect_owned/preempt accounting is a bit wrong in that they charge
-	 * the execution duration to the layer that just ran which may be
-	 * different from the layer that is protected on the CPU. Oh well...
-	 */
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OWNED] += bytes;
-		if (cpuc->protect_owned) {
-			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-			cpuc->layer_membw_agg[task_lid][LAYER_USAGE_PROTECTED] += bytes;
-		}
-		if (cpuc->protect_owned_preempt) {
-			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
-			cpuc->layer_membw_agg[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += bytes;
-		}
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
@@ -2147,30 +2118,15 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		/*
 		 * CPU is in an open layer.
 		 */
-		if (cpuc->protect_owned) {
-			if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-			if (try_consume_layers(cpuc->on_layer_order, nr_on_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-			if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-			if (try_consume_layers(cpuc->gn_layer_order, nr_gn_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-		} else {
-			if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-			if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-			if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
-					       MAX_LAYERS, cpuc, llcc))
-				return;
-		}
+		if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
+				       MAX_LAYERS, cpuc, llcc))
+			return;
+		if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
+				       MAX_LAYERS, cpuc, llcc))
+			return;
+		if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
+				       MAX_LAYERS, cpuc, llcc))
+			return;
 	} else {
 		/*
 		 * CPU is in a grouped or confined layer or not assigned.
@@ -2184,7 +2140,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 * Grouped/open preempt layers first if there's no owner layer
 		 * or the owner layer is not protected or preempting.
 		 */
-		if (!owner_layer || (!owner_layer->is_protected && !cpuc->protect_owned && !owner_layer->preempt)) {
+		if (!owner_layer || (!owner_layer->is_protected && !owner_layer->preempt)) {
 			if (try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
 					       cpuc->layer_id, cpuc, llcc))
 				return;
@@ -2729,7 +2685,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 	struct layer *task_layer;
 	u64 now = scx_bpf_now();
-	u64 usage_since_idle;
 	s32 task_lid;
 	u64 runtime;
 
@@ -2752,33 +2707,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	else if (taskc->dsq_id & LO_FB_DSQ_BASE)
 		gstat_inc(GSTAT_LO_FB_EVENTS, cpuc);
 
-	/*
-	 * Owned execution protection. Apply iff the CPU stayed saturated for
-	 * longer than twice the slice.
-	 */
-	usage_since_idle = cpuc->usage - cpuc->usage_at_idle;
-
-	cpuc->protect_owned = false;
-	cpuc->protect_owned_preempt = false;
 	cpuc->is_protected = false;
-
-	if (cpuc->in_open_layers) {
-		if (task_layer->kind == LAYER_KIND_OPEN && !task_layer->preempt) {
-			cpuc->protect_owned = usage_since_idle > min_open_layer_disallow_open_after_ns;
-			cpuc->protect_owned_preempt = usage_since_idle > min_open_layer_disallow_preempt_after_ns;
-		}
-	} else {
-		struct layer *cpu_layer = NULL;
-
-		if (cpuc->layer_id != MAX_LAYERS &&
-		    !(cpu_layer = lookup_layer(cpuc->layer_id)))
-			return;
-
-		if (cpu_layer) {
-			cpuc->protect_owned = usage_since_idle > cpu_layer->disallow_open_after_ns;
-			cpuc->protect_owned_preempt = usage_since_idle > cpu_layer->disallow_preempt_after_ns;
-		}
-	}
 
 	cpuc->running_fallback = false;
 	cpuc->current_preempt = false;
@@ -2937,13 +2866,6 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 {
-	struct cpu_ctx *cpuc;
-
-	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)))
-		return;
-
-	cpuc->protect_owned = false;
-	cpuc->usage_at_idle = cpuc->usage;
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
@@ -3379,13 +3301,10 @@ static s32 init_layer(int layer_id)
 	struct layer *layer = &layers[layer_id];
 	int i, j, ret;
 
-	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d excl=%d",
+	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d excl=%d protected=%d",
 	    layer_id, layer->name, layer->min_exec_ns,
 	    layer->kind != LAYER_KIND_CONFINED,
-	    layer->preempt, layer->excl);
-	dbg("CFG      disallow_open/preempt_after/protected=%lu/%lu/%d",
-	    layer->disallow_open_after_ns, layer->disallow_preempt_after_ns,
-	    layer->is_protected);
+	    layer->preempt, layer->excl, layer->is_protected);
 
 	layer->id = layer_id;
 
@@ -3607,8 +3526,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
-	dbg("CFG: min_open_layer_disallow_open/preempt_after=%lu/%lu",
-	    min_open_layer_disallow_open_after_ns, min_open_layer_disallow_preempt_after_ns);
 
 	bpf_for(i, 0, nr_layers) {
 		ret = init_layer(i);

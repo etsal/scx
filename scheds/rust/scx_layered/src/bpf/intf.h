@@ -99,9 +99,6 @@ enum layer_usage {
 	LAYER_USAGE_OPEN,
 	LAYER_USAGE_SUM_UPTO = LAYER_USAGE_OPEN,
 
-	LAYER_USAGE_PROTECTED,
-	LAYER_USAGE_PROTECTED_PREEMPT,
-
 	NR_LAYER_USAGES,
 };
 
@@ -184,8 +181,6 @@ struct cpu_ctx {
 	struct task_struct	*preempting_task;
 	u64			preempting_at;
 
-	bool			protect_owned;
-	bool			protect_owned_preempt;
 	bool			running_owned;
 	bool			running_open;
 	bool			running_fallback;
@@ -199,7 +194,6 @@ struct cpu_ctx {
 	u64			ran_current_for;
 
 	u64			usage;
-	u64			usage_at_idle;
 
 	u64			hi_fb_dsq_id;
 	u64			lo_fb_dsq_id;
@@ -288,8 +282,6 @@ struct layer {
 	u64			slice_ns;
 	bool			fifo;
 	u32			weight;
-	u64			disallow_open_after_ns;
-	u64			disallow_preempt_after_ns;
 	u64			xllc_mig_min_ns;
 
 	int			kind;

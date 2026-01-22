@@ -88,9 +88,6 @@ const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 const LAYER_USAGE_OWNED: usize = bpf_intf::layer_usage_LAYER_USAGE_OWNED as usize;
 const LAYER_USAGE_OPEN: usize = bpf_intf::layer_usage_LAYER_USAGE_OPEN as usize;
 const LAYER_USAGE_SUM_UPTO: usize = bpf_intf::layer_usage_LAYER_USAGE_SUM_UPTO as usize;
-const LAYER_USAGE_PROTECTED: usize = bpf_intf::layer_usage_LAYER_USAGE_PROTECTED as usize;
-const LAYER_USAGE_PROTECTED_PREEMPT: usize =
-    bpf_intf::layer_usage_LAYER_USAGE_PROTECTED_PREEMPT as usize;
 const NR_LAYER_USAGES: usize = bpf_intf::layer_usage_NR_LAYER_USAGES as usize;
 
 const NR_GSTATS: usize = bpf_intf::global_stat_id_NR_GSTATS as usize;
@@ -107,8 +104,6 @@ fn nvml() -> Result<&'static Nvml, NvmlError> {
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
-    static ref DFL_DISALLOW_OPEN_AFTER_US: u64 = 2 * scx_enums.SCX_SLICE_DFL / 1000;
-    static ref DFL_DISALLOW_PREEMPT_AFTER_US: u64 = 4 * scx_enums.SCX_SLICE_DFL / 1000;
     static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
         specs: vec![
             LayerSpec {
@@ -137,8 +132,6 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         idle_resume_us: None,
@@ -170,8 +163,6 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         perf: 1024,
@@ -209,8 +200,6 @@ lazy_static! {
                         slice_us: 800,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         perf: 1024,
@@ -246,8 +235,6 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 100.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         perf: 1024,
@@ -386,15 +373,9 @@ lazy_static! {
 ///   utilization to determine the infeasible adjusted weight with higher
 ///   weights having a larger adjustment in adjusted utilization.
 ///
-/// - disallow_open_after_us: Duration to wait after machine reaches saturation
-///   before confining tasks in Open layers.
-///
 /// - cpus_range_frac: Array of 2 floats between 0 and 1.0. Lower and upper
 ///   bound fractions of all CPUs to give to a layer. Mutually exclusive
 ///   with cpus_range.
-///
-/// - disallow_preempt_after_us: Duration to wait after machine reaches saturation
-///   before confining tasks to preempt.
 ///
 /// - xllc_mig_min_us: Skip cross-LLC migrations if they are likely to run on
 ///   their existing LLC sooner than this.
@@ -1685,8 +1666,6 @@ impl<'a> Scheduler<'a> {
                     slice_us,
                     fifo,
                     weight,
-                    disallow_open_after_us,
-                    disallow_preempt_after_us,
                     xllc_mig_min_us,
                     member_expire_ms,
                     ..
@@ -1714,14 +1693,6 @@ impl<'a> Scheduler<'a> {
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.member_expire_ms = *member_expire_ms;
-                layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
-                    v if v == u64::MAX => v,
-                    v => v * 1000,
-                };
-                layer.disallow_preempt_after_ns = match disallow_preempt_after_us.unwrap() {
-                    v if v == u64::MAX => v,
-                    v => v * 1000,
-                };
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
@@ -2308,25 +2279,6 @@ impl<'a> Scheduler<'a> {
             .iter()
             .filter(|spec| spec.kind.common().exclusive)
             .count() as u32;
-
-        let mut min_open = u64::MAX;
-        let mut min_preempt = u64::MAX;
-
-        for spec in layer_specs.iter() {
-            if let LayerKind::Open { common, .. } = &spec.kind {
-                min_open = min_open.min(common.disallow_open_after_us.unwrap());
-                min_preempt = min_preempt.min(common.disallow_preempt_after_us.unwrap());
-            }
-        }
-
-        rodata.min_open_layer_disallow_open_after_ns = match min_open {
-            u64::MAX => *DFL_DISALLOW_OPEN_AFTER_US,
-            v => v,
-        };
-        rodata.min_open_layer_disallow_preempt_after_ns = match min_preempt {
-            u64::MAX => *DFL_DISALLOW_PREEMPT_AFTER_US,
-            v => v,
-        };
 
         // Consider all layers empty at the beginning.
         for i in 0..layer_specs.len() {
@@ -3344,31 +3296,6 @@ fn main(opts: Opts) -> Result<()> {
             common.weight = DEFAULT_LAYER_WEIGHT;
         }
         common.weight = common.weight.clamp(MIN_LAYER_WEIGHT, MAX_LAYER_WEIGHT);
-
-        if common.preempt {
-            if common.disallow_open_after_us.is_some() {
-                warn!(
-                    "Preempt layer {} has non-null disallow_open_after_us, ignored",
-                    &spec.name
-                );
-            }
-            if common.disallow_preempt_after_us.is_some() {
-                warn!(
-                    "Preempt layer {} has non-null disallow_preempt_after_us, ignored",
-                    &spec.name
-                );
-            }
-            common.disallow_open_after_us = Some(u64::MAX);
-            common.disallow_preempt_after_us = Some(u64::MAX);
-        } else {
-            if common.disallow_open_after_us.is_none() {
-                common.disallow_open_after_us = Some(*DFL_DISALLOW_OPEN_AFTER_US);
-            }
-
-            if common.disallow_preempt_after_us.is_none() {
-                common.disallow_preempt_after_us = Some(*DFL_DISALLOW_PREEMPT_AFTER_US);
-            }
-        }
 
         if common.idle_smt.is_some() {
             warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);
