@@ -19,7 +19,6 @@ use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
 use serde::Deserialize;
 use serde::Serialize;
-use tracing::warn;
 
 use crate::bpf_intf;
 use crate::BpfStats;
@@ -29,8 +28,6 @@ use crate::Stats;
 use crate::LAYER_USAGE_OPEN;
 use crate::LAYER_USAGE_SUM_UPTO;
 
-const GSTAT_EXCL_IDLE: usize = bpf_intf::global_stat_id_GSTAT_EXCL_IDLE as usize;
-const GSTAT_EXCL_WAKEUP: usize = bpf_intf::global_stat_id_GSTAT_EXCL_WAKEUP as usize;
 const GSTAT_HI_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_EVENTS as usize;
 const GSTAT_HI_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_USAGE as usize;
 const GSTAT_LO_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_EVENTS as usize;
@@ -61,8 +58,6 @@ const LSTAT_PREEMPT_XLLC: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XLLC as 
 const LSTAT_PREEMPT_XNUMA: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XNUMA as usize;
 const LSTAT_PREEMPT_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE as usize;
 const LSTAT_PREEMPT_FAIL: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL as usize;
-const LSTAT_EXCL_COLLISION: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION as usize;
-const LSTAT_EXCL_PREEMPT: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT as usize;
 const LSTAT_YIELD: usize = bpf_intf::layer_stat_id_LSTAT_YIELD as usize;
 const LSTAT_YIELD_IGNORE: usize = bpf_intf::layer_stat_id_LSTAT_YIELD_IGNORE as usize;
 const LSTAT_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_MIGRATION as usize;
@@ -160,12 +155,6 @@ pub struct LayerStats {
     pub keep_fail_max_exec: f64,
     #[stat(desc = "% disallowed to continue executing due to other tasks")]
     pub keep_fail_busy: f64,
-    #[stat(desc = "whether is exclusive", _om_skip)]
-    pub is_excl: u32,
-    #[stat(desc = "count of times an excl task skipped a CPU as the sibling was also excl")]
-    pub excl_collision: f64,
-    #[stat(desc = "% a sibling CPU was preempted for an exclusive task")]
-    pub excl_preempt: f64,
     #[stat(desc = "% yielded")]
     pub yielded: f64,
     #[stat(desc = "count of times yield was ignored")]
@@ -281,9 +270,6 @@ impl LayerStats {
             keep: lstat_pct(LSTAT_KEEP),
             keep_fail_max_exec: lstat_pct(LSTAT_KEEP_FAIL_MAX_EXEC),
             keep_fail_busy: lstat_pct(LSTAT_KEEP_FAIL_BUSY),
-            is_excl: layer.kind.common().exclusive as u32,
-            excl_collision: lstat_pct(LSTAT_EXCL_COLLISION),
-            excl_preempt: lstat_pct(LSTAT_EXCL_PREEMPT),
             yielded: lstat_pct(LSTAT_YIELD),
             yield_ignore: lstat(LSTAT_YIELD_IGNORE) as u64,
             migration: lstat_pct(LSTAT_MIGRATION),
@@ -445,24 +431,6 @@ impl LayerStats {
         }
         writeln!(w, "")?;
 
-        if self.is_excl != 0 {
-            writeln!(
-                w,
-                "  {:<width$}  excl_coll={} excl_preempt={}",
-                "",
-                fmt_pct(self.excl_collision),
-                fmt_pct(self.excl_preempt),
-                width = header_width,
-            )?;
-        } else if self.excl_collision != 0.0 || self.excl_preempt != 0.0 {
-            warn!(
-                "{}: exclusive is off but excl_coll={} excl_preempt={}",
-                name,
-                fmt_pct(self.excl_collision),
-                fmt_pct(self.excl_preempt),
-            );
-        }
-
         Ok(())
     }
 }
@@ -489,16 +457,6 @@ pub struct SysStats {
     pub hi_fb: f64,
     #[stat(desc = "% sent to lo fallback DSQs")]
     pub lo_fb: f64,
-    #[stat(desc = "count of times an excl task skipped a CPU as the sibling was also excl")]
-    pub excl_collision: f64,
-    #[stat(desc = "count of times a sibling CPU was preempted for an excl task")]
-    pub excl_preempt: f64,
-    #[stat(desc = "count of times a CPU skipped dispatching due to an excl task on the sibling")]
-    pub excl_idle: f64,
-    #[stat(
-        desc = "count of times an idle sibling CPU was woken up after an excl task is finished"
-    )]
-    pub excl_wakeup: f64,
     #[stat(desc = "CPU time this binary consumed during the period")]
     pub proc_ms: u64,
     #[stat(desc = "CPU busy % (100% means all CPU)")]
@@ -566,10 +524,6 @@ impl SysStats {
                 stats.bpf_stats.gstats[GSTAT_LO_FB_EVENTS] as f64,
                 total as f64,
             ),
-            excl_collision: lsum_pct(LSTAT_EXCL_COLLISION),
-            excl_preempt: lsum_pct(LSTAT_EXCL_PREEMPT),
-            excl_idle: bstats.gstats[GSTAT_EXCL_IDLE] as f64 / total as f64,
-            excl_wakeup: bstats.gstats[GSTAT_EXCL_WAKEUP] as f64 / total as f64,
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
@@ -616,12 +570,6 @@ impl SysStats {
             self.fallback_cpu_util,
             self.proc_ms,
             self.system_cpu_util_ewma,
-        )?;
-
-        writeln!(
-            w,
-            "excl_coll={:.2} excl_preempt={:.2} excl_idle={:.2} excl_wakeup={:.2}",
-            self.excl_collision, self.excl_preempt, self.excl_idle, self.excl_wakeup
         )?;
 
         writeln!(

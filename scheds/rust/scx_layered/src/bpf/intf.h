@@ -104,8 +104,6 @@ enum layer_usage {
 
 /* Statistics */
 enum global_stat_id {
-	GSTAT_EXCL_IDLE,
-	GSTAT_EXCL_WAKEUP,
 	GSTAT_HI_FB_EVENTS,
 	GSTAT_HI_FB_USAGE,
 	GSTAT_LO_FB_EVENTS,
@@ -138,8 +136,6 @@ enum layer_stat_id {
 	LSTAT_PREEMPT_XNUMA,
 	LSTAT_PREEMPT_IDLE,
 	LSTAT_PREEMPT_FAIL,
-	LSTAT_EXCL_COLLISION,
-	LSTAT_EXCL_PREEMPT,
 	LSTAT_YIELD,
 	LSTAT_YIELD_IGNORE,
 	LSTAT_MIGRATION,
@@ -172,9 +168,6 @@ struct cpu_prox_map {
 struct cpu_ctx {
 	s32			cpu;
 	bool			current_preempt;
-	bool			current_excl;
-	bool			prev_excl;
-	bool			next_excl;
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
@@ -287,7 +280,6 @@ struct layer {
 	int			kind;
 	bool			preempt;
 	bool			preempt_first;
-	bool			excl;
 	bool			allow_node_aligned;
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;

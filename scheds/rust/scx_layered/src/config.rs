@@ -86,8 +86,6 @@ pub struct LayerCommon {
     #[serde(default)]
     pub preempt_first: bool,
     #[serde(default)]
-    pub exclusive: bool,
-    #[serde(default)]
     pub allow_node_aligned: bool,
     #[serde(default)]
     pub skip_remote_node: bool,

@@ -43,7 +43,6 @@ const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = true;
 const volatile bool xnuma_preemption = false;
-const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
@@ -51,7 +50,6 @@ const volatile u32 nr_op_layers;	/* open && preempt */
 const volatile u32 nr_on_layers;	/* open && !preempt */
 const volatile u32 nr_gp_layers;	/* grouped && preempt */
 const volatile u32 nr_gn_layers;	/* grouped && !preempt */
-const volatile u32 nr_excl_layers;
 const volatile bool kfuncs_supported_in_syscall = true;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
@@ -105,20 +103,6 @@ static inline bool is_percpu_kthread_preempting(struct task_struct *p)
 {
 	return percpu_kthread_preempt &&
 		(percpu_kthread_preempt_all || p->scx.weight > 100);
-}
-
-static inline s32 sibling_cpu(s32 cpu)
-{
-	const volatile s32 *sib;
-
-	if (!smt_enabled)
-		return -1;
-
-	sib = MEMBER_VPTR(__sibling_cpu, [cpu]);
-	if (sib)
-		return *sib;
-	else
-		return -1;
 }
 
 static __always_inline struct layer *lookup_layer(u32 id)
@@ -891,31 +875,13 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
 			return cpu;
-
-		if (nr_excl_layers && layer->excl)
-			return -EBUSY;
 	}
 
-	bpf_for(i, 0, nr_cpu_ids) {
-		struct cpu_ctx *sib_cpuc;
-		s32 sib;
-
-		// try prev if not tried yet and then pick any idle CPU
-		if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			prev_in_cand = false;
-		} else {
-			cpu = scx_bpf_pick_idle_cpu(cand_cpumask, 0);
-			if (cpu < 0)
-				break;
-		}
-
-		// continue the search if the sibling is exclusive
-		if (!nr_excl_layers ||
-		    (sib = sibling_cpu(cpu)) < 0 || !(sib_cpuc = lookup_cpu_ctx(sib)) ||
-		    (!sib_cpuc->current_excl && !sib_cpuc->next_excl))
-			break;
-	}
+	// try prev if not tried yet and then pick any idle CPU
+	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		cpu = prev_cpu;
+	else
+		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, 0);
 
 	return cpu;
 }
@@ -924,8 +890,7 @@ static __always_inline
 bool should_try_preempt_first(s32 cand, struct layer *layer,
 			      const struct cpumask *layered_cpumask)
 {
-	struct cpu_ctx *cand_cpuc, *sib_cpuc;
-	s32 sib;
+	struct cpu_ctx *cand_cpuc;
 
 	if (!layer->preempt || !layer->preempt_first)
 		return false;
@@ -935,10 +900,6 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 		return false;
 
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)) || cand_cpuc->current_preempt)
-		return false;
-
-	if (nr_excl_layers && layer->excl && (sib = sibling_cpu(cand)) >= 0 &&
-	    (!(sib_cpuc = lookup_cpu_ctx(sib)) || sib_cpuc->current_preempt))
 		return false;
 
 	return true;
@@ -1169,7 +1130,6 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 enum preempt_flags {
 	PREEMPT_FIRST		= 1LLU << 0,
-	PREEMPT_IGNORE_EXCL	= 1LLU << 1,
 };
 
 /*
@@ -1181,11 +1141,9 @@ enum preempt_flags {
 static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *taskc,
 			    struct layer *layer, u64 flags)
 {
-	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
+	struct cpu_ctx *cpuc, *cand_cpuc;
 	struct task_struct *curr;
-	const struct cpumask *idle_cpumask;
 	bool cand_idle;
-	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1226,20 +1184,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	}
 	bpf_rcu_read_unlock();
 
-	/*
-	 * If exclusive, we want to make sure the sibling CPU, if there's
-	 * one, is idle. However, if the sibling CPU is already running a
-	 * preempt task, we shouldn't kick it out.
-	 */
-	if (nr_excl_layers && !(flags & PREEMPT_IGNORE_EXCL) &&
-	    layer->excl && (sib = sibling_cpu(cand)) >= 0 &&
-	    (!(sib_cpuc = lookup_cpu_ctx(sib)) || sib_cpuc->current_preempt)) {
-		if (!(cpuc = lookup_cpu_ctx(-1)))
-			return false;
-		lstat_inc(LSTAT_EXCL_COLLISION, layer, cpuc);
-		return false;
-	}
-
 preempt:
 	/*
 	 * Exclude other racing preemptors. While this significantly reduces the
@@ -1260,27 +1204,6 @@ preempt:
 	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return true;
 
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-
-	/*
-	 * $sib_cpuc is set if @p is an exclusive task, a sibling CPU
-	 * exists which is not running a preempt task. Let's preempt the
-	 * sibling CPU so that it can become idle. The ->maybe_idle test is
-	 * inaccurate and racy but should be good enough for best-effort
-	 * optimization.
-	 */
-	if (nr_excl_layers && sib_cpuc &&
-	    !bpf_cpumask_test_cpu(sib_cpuc->cpu, idle_cpumask)) {
-		lstat_inc(LSTAT_EXCL_PREEMPT, layer, cpuc);
-		/*
-		 * cpuc->current_excl will be set by running(); however, the
-		 * sibling CPU might enter dispatch() before this CPU enters
-		 * running(). Set cpuc->next_excl here.
-		 */
-		cpuc->next_excl = true;
-		scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
-	}
-
 	if (cand_idle) {
 		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
 	} else {
@@ -1289,7 +1212,6 @@ preempt:
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
 	}
 
-	scx_bpf_put_idle_cpumask(idle_cpumask);
 	return true;
 }
 
@@ -1424,17 +1346,6 @@ skip_ddsp:
 				u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 				if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, 0))
 					return;
-			}
-
-			if (nr_excl_layers && layer->excl) {
-				bpf_for(cpu, 0, MAX_CPUS) {
-					if (cpu >= pmap->sys_end)
-						break;
-					u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
-					if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer,
-								     PREEMPT_IGNORE_EXCL))
-						return;
-				}
 			}
 		}
 
@@ -1987,28 +1898,6 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct layer *prev_layer,
-				   struct task_ctx *prev_taskc, struct cpu_ctx *cpuc)
-{
-
-	/*
-	 * If the sibling CPU is running an exclusive task, keep this CPU idle
-	 * unless @prev is also runnable and exclusive.
-	 */
-	if (nr_excl_layers && (!prev_taskc || !prev_layer->excl)) {
-		struct cpu_ctx *sib_cpuc;
-		s32 sib;
-
-		if ((sib = sibling_cpu(cpu)) >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
-		    (sib_cpuc->current_excl || sib_cpuc->next_excl)) {
-			gstat_inc(GSTAT_EXCL_IDLE, cpuc);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_ctx *prev_taskc = NULL;
@@ -2033,9 +1922,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
 			return;
 	}
-
-	if (prev && sib_keep_idle(cpu, prev, prev_layer, prev_taskc, cpuc))
-		return;
 
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
@@ -2654,25 +2540,6 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		cpuc->running_open = false;
 	}
 
-	/*
-	 * If this CPU is transitioning from running an exclusive task to a
-	 * non-exclusive one, the sibling CPU has likely been idle. Wake it up.
-	 */
-	if (nr_excl_layers) {
-		cpuc->next_excl = false;
-		cpuc->current_excl = layer->excl;
-
-		if (cpuc->prev_excl && !cpuc->current_excl) {
-			s32 sib = sibling_cpu(task_cpu);
-			struct cpu_ctx *sib_cpuc;
-
-			if (sib >= 0 && (sib_cpuc = lookup_cpu_ctx(sib))) {
-				gstat_inc(GSTAT_EXCL_WAKEUP, cpuc);
-				scx_bpf_kick_cpu(sib, SCX_KICK_IDLE);
-			}
-		}
-	}
-
 	if (layer->perf > 0 && cpuc->perf != layer->perf) {
 		scx_bpf_cpuperf_set(task_cpu, layer->perf);
 		cpuc->perf = layer->perf;
@@ -2711,11 +2578,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 
 	cpuc->running_fallback = false;
 	cpuc->current_preempt = false;
-
-	if (nr_excl_layers) {
-		cpuc->prev_excl = cpuc->current_excl;
-		cpuc->current_excl = false;
-	}
 
 	/*
 	 * Apply min_exec_us, scale the execution time by the inverse of the
@@ -3301,10 +3163,10 @@ static s32 init_layer(int layer_id)
 	struct layer *layer = &layers[layer_id];
 	int i, j, ret;
 
-	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d excl=%d protected=%d",
+	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d protected=%d",
 	    layer_id, layer->name, layer->min_exec_ns,
 	    layer->kind != LAYER_KIND_CONFINED,
-	    layer->preempt, layer->excl, layer->is_protected);
+	    layer->preempt, layer->is_protected);
 
 	layer->id = layer_id;
 

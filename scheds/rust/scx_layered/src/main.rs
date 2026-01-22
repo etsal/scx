@@ -124,7 +124,6 @@ lazy_static! {
                         yield_ignore: 0.0,
                         preempt: false,
                         preempt_first: false,
-                        exclusive: false,
                         allow_node_aligned: false,
                         skip_remote_node: false,
                         prev_over_idle_core: false,
@@ -155,7 +154,6 @@ lazy_static! {
                         yield_ignore: 0.25,
                         preempt: true,
                         preempt_first: false,
-                        exclusive: true,
                         allow_node_aligned: true,
                         skip_remote_node: false,
                         prev_over_idle_core: true,
@@ -192,7 +190,6 @@ lazy_static! {
                         yield_ignore: 0.0,
                         preempt: true,
                         preempt_first: false,
-                        exclusive: false,
                         allow_node_aligned: false,
                         skip_remote_node: false,
                         prev_over_idle_core: false,
@@ -227,7 +224,6 @@ lazy_static! {
                         yield_ignore: 0.0,
                         preempt: false,
                         preempt_first: false,
-                        exclusive: false,
                         allow_node_aligned: false,
                         skip_remote_node: false,
                         prev_over_idle_core: false,
@@ -353,10 +349,6 @@ lazy_static! {
 ///
 /// - preempt_first: If true, tasks in the layer will try to preempt tasks
 ///   in their previous CPUs before trying to find idle CPUs.
-///
-/// - exclusive: If true, tasks in the layer will occupy the whole core. The
-///   other logical CPUs sharing the same core will be kept idle. This isn't
-///   a hard guarantee, so don't depend on it for security purposes.
 ///
 /// - allow_node_aligned: Put node aligned tasks on layer DSQs instead of lo
 ///   fallback. This is a hack to support node-affine tasks without making
@@ -1657,7 +1649,6 @@ impl<'a> Scheduler<'a> {
                     perf,
                     preempt,
                     preempt_first,
-                    exclusive,
                     allow_node_aligned,
                     skip_remote_node,
                     prev_over_idle_core,
@@ -1686,7 +1677,6 @@ impl<'a> Scheduler<'a> {
                 copy_into_cstr(&mut layer.name, layer_name.as_str());
                 layer.preempt.write(*preempt);
                 layer.preempt_first.write(*preempt_first);
-                layer.excl.write(*exclusive);
                 layer.allow_node_aligned.write(*allow_node_aligned);
                 layer.skip_remote_node.write(*skip_remote_node);
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
@@ -2240,9 +2230,6 @@ impl<'a> Scheduler<'a> {
         rodata.enable_gpu_support = opts.enable_gpu_support;
         rodata.kfuncs_supported_in_syscall = kfuncs_in_syscall;
 
-        for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
-            rodata.__sibling_cpu[cpu] = *sib;
-        }
         for cpu in topo.all_cpus.keys() {
             rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
@@ -2274,10 +2261,6 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
-            .count() as u32;
-        rodata.nr_excl_layers = layer_specs
-            .iter()
-            .filter(|spec| spec.kind.common().exclusive)
             .count() as u32;
 
         // Consider all layers empty at the beginning.
