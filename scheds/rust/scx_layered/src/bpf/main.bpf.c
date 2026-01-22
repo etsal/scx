@@ -856,14 +856,6 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 * partially idle @prev_cpu.
 	 */
 	if (smt_enabled) {
-		// try prev if prev_over_idle_core
-		if (prev_in_cand &&
-			layer->prev_over_idle_core) {
-			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-				return prev_cpu;
-			prev_in_cand = false;
-		}
-
 		// try prev if smt sibling empty
 		if (prev_in_cand && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) {
 			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))

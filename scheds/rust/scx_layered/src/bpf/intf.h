@@ -282,7 +282,6 @@ struct layer {
 	bool			preempt_first;
 	bool			allow_node_aligned;
 	bool			skip_remote_node;
-	bool			prev_over_idle_core;
 	int			growth_algo;
 
 	u64			nr_tasks;
