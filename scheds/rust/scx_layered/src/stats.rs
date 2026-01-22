@@ -63,7 +63,6 @@ const LSTAT_YIELD_IGNORE: usize = bpf_intf::layer_stat_id_LSTAT_YIELD_IGNORE as 
 const LSTAT_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_MIGRATION as usize;
 const LSTAT_XNUMA_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XNUMA_MIGRATION as usize;
 const LSTAT_XLLC_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION as usize;
-const LSTAT_XLLC_MIGRATION_SKIP: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP as usize;
 const LSTAT_XLAYER_WAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE as usize;
 const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE as usize;
 const LSTAT_LLC_DRAIN_TRY: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN_TRY as usize;
@@ -165,8 +164,6 @@ pub struct LayerStats {
     pub xnuma_migration: f64,
     #[stat(desc = "% migrated across LLCs")]
     pub xllc_migration: f64,
-    #[stat(desc = "% migration skipped across LLCs due to xllc_mig_min_us")]
-    pub xllc_migration_skip: f64,
     #[stat(desc = "% wakers across layers")]
     pub xlayer_wake: f64,
     #[stat(desc = "% rewakers across layers where waker has waken the task previously")]
@@ -277,7 +274,6 @@ impl LayerStats {
             xlayer_wake: lstat_pct(LSTAT_XLAYER_WAKE),
             xlayer_rewake: lstat_pct(LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(LSTAT_XLLC_MIGRATION),
-            xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
             llc_drain_try: lstat_pct(LSTAT_LLC_DRAIN_TRY),
             llc_drain: lstat_pct(LSTAT_LLC_DRAIN),
             skip_remote_node: lstat_pct(LSTAT_SKIP_REMOTE_NODE),
@@ -348,13 +344,12 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip={}/{} affn_viol={}",
+            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig={} affn_viol={}",
             "",
             fmt_pct(self.open_idle),
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
-            fmt_pct(self.xllc_migration_skip),
             fmt_pct(self.affn_viol),
             width = header_width,
         )?;
@@ -473,7 +468,7 @@ pub struct SysStats {
     pub skip_preempt: u64,
     #[stat(desc = "Number of times vtime was out of range and fixed up")]
     pub fixup_vtime: u64,
-    #[stat(desc = "Number of times cpuc->preempting_task didn't come on the CPU")]
+    #[stat(desc = "Number of times cpuc->preempting_pid didn't come on the CPU")]
     pub preempting_mismatch: u64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,

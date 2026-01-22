@@ -91,8 +91,6 @@ pub struct LayerCommon {
     pub skip_remote_node: bool,
     #[serde(default)]
     pub weight: u32,
-    #[serde(default)]
-    pub xllc_mig_min_us: f64,
     #[serde(default, skip_serializing)]
     pub idle_smt: Option<bool>,
     #[serde(default)]

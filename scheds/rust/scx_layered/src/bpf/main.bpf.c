@@ -533,9 +533,6 @@ struct task_ctx {
 	pid_t			last_waker;
 	bool			refresh_layer;
 	struct cached_cpus	layered_cpus;
-	/*
-	 * XXX: Old kernels can't track a bpf_cpumask on nested structs
-	 */
 	struct bpf_cpumask __kptr *layered_mask;
 	struct cached_cpus	layered_cpus_llc;
 	struct bpf_cpumask __kptr *layered_llc_mask;
@@ -987,8 +984,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * Try a CPU in the previous LLC.
 	 */
 	if (nr_llcs > 1) {
-		struct llc_ctx *prev_llcc;
-
 		maybe_refresh_layered_cpus_llc(p, taskc, layer_cpumask,
 					       prev_cpuc->llc_id, cpus_seq);
 		if (!(cpumask = cast_mask(taskc->layered_llc_mask))) {
@@ -997,13 +992,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		}
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
-
-		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
-		    prev_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
-			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
-			cpu = -1;
-			goto out_put;
-		}
 	}
 
 	/*
@@ -1139,7 +1127,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
 		return false;
 
-	if (cand_cpuc->preempting_task || cand_cpuc->current_preempt)
+	if (cand_cpuc->preempting_pid >= 0 || cand_cpuc->current_preempt)
 		return false;
 
 	cand_idle = scx_bpf_test_and_clear_cpu_idle(cand);
@@ -1149,7 +1137,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	/*
 	 * This racy check helps with reducing the incidence rate of preempting
 	 * a CPU which already has tasks queued in its local DSQ. See the
-	 * comment above preempting_task check.
+	 * comment above preempting_pid check.
 	 */
 	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cand))
 		return false;
@@ -1181,7 +1169,7 @@ preempt:
 	 * dispatch to the CPU. We need kernel API updates to make this fully
 	 * race-free.
 	 */
-	if (__sync_val_compare_and_swap(&cand_cpuc->preempting_task, NULL, p))
+	if (__sync_val_compare_and_swap(&cand_cpuc->preempting_pid, -1, p->pid) != -1)
 		return false;
 	cand_cpuc->preempting_at = scx_bpf_now();
 
@@ -1811,7 +1799,6 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	struct llc_prox_map *llc_pmap = &llcc->prox_map;
 	struct layer *layer;
 	u32 nid = llc_node_id(llcc->id);
-	bool xllc_mig_skipped = false;
 	bool skip_remote_node;
 	u32 u;
 
@@ -1845,19 +1832,11 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 				lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 				continue;
 			}
-
-			if (remote_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
-				xllc_mig_skipped = true;
-				continue;
-			}
 		}
 
 		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
 	}
-
-	if (xllc_mig_skipped)
-		lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
 
 	return false;
 }
@@ -2464,7 +2443,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 {
-	struct task_struct *preempting;
+	s32 preempting_pid;
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *layer;
@@ -2507,14 +2486,14 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	taskc->running_at = now;
 	cpuc->is_protected = layer->is_protected;
 
-	preempting = READ_ONCE(cpuc->preempting_task);
-	if (preempting) {
-		if (preempting == p)
-			WRITE_ONCE(cpuc->preempting_task, NULL);
+	preempting_pid = READ_ONCE(cpuc->preempting_pid);
+	if (preempting_pid >= 0) {
+		if (preempting_pid == p->pid)
+			WRITE_ONCE(cpuc->preempting_pid, -1);
 		else if (now - cpuc->preempting_at > CLEAR_PREEMPTING_AFTER) {
 			/* this can happen due to e.g. reenqueue_local */
 			gstat_inc(GSTAT_PREEMPTING_MISMATCH, cpuc);
-			WRITE_ONCE(cpuc->preempting_task, NULL);
+			WRITE_ONCE(cpuc->preempting_pid, -1);
 		}
 	}
 

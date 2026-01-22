@@ -141,7 +141,6 @@ enum layer_stat_id {
 	LSTAT_MIGRATION,
 	LSTAT_XNUMA_MIGRATION,
 	LSTAT_XLLC_MIGRATION,
-	LSTAT_XLLC_MIGRATION_SKIP,
 	LSTAT_XLAYER_WAKE,
 	LSTAT_XLAYER_REWAKE,
 	LSTAT_LLC_DRAIN_TRY,
@@ -171,7 +170,7 @@ struct cpu_ctx {
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
-	struct task_struct	*preempting_task;
+	s32			preempting_pid;
 	u64			preempting_at;
 
 	bool			running_owned;
@@ -275,7 +274,6 @@ struct layer {
 	u64			slice_ns;
 	bool			fifo;
 	u32			weight;
-	u64			xllc_mig_min_ns;
 
 	int			kind;
 	bool			preempt;

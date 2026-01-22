@@ -130,7 +130,6 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         idle_resume_us: None,
                         perf: 1024,
@@ -159,7 +158,6 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         perf: 1024,
                         idle_resume_us: None,
@@ -194,7 +192,6 @@ lazy_static! {
                         slice_us: 800,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         perf: 1024,
                         idle_resume_us: None,
@@ -227,7 +224,6 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: 100.0,
                         growth_algo: LayerGrowthAlgo::NodeSpreadRandom,
                         perf: 1024,
                         idle_resume_us: None,
@@ -360,9 +356,6 @@ lazy_static! {
 /// - cpus_range_frac: Array of 2 floats between 0 and 1.0. Lower and upper
 ///   bound fractions of all CPUs to give to a layer. Mutually exclusive
 ///   with cpus_range.
-///
-/// - xllc_mig_min_us: Skip cross-LLC migrations if they are likely to run on
-///   their existing LLC sooner than this.
 ///
 /// - idle_smt: *** DEPRECATED ****
 ///
@@ -1642,7 +1635,6 @@ impl<'a> Scheduler<'a> {
                     slice_us,
                     fifo,
                     weight,
-                    xllc_mig_min_us,
                     member_expire_ms,
                     ..
                 } = spec.kind.common();
@@ -1667,7 +1659,6 @@ impl<'a> Scheduler<'a> {
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.member_expire_ms = *member_expire_ms;
-                layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
