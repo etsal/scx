@@ -302,7 +302,6 @@ struct layer {
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
-	bool			periodically_refresh;
 	u8			cpuset[MAX_CPUS_U8];
 	u64			member_expire_ms;
 };

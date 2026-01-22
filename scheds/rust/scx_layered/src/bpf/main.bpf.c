@@ -56,7 +56,6 @@ const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 const volatile bool percpu_kthread_preempt_all = false;
 const volatile u64 membw_event = 0;
-volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -556,8 +555,6 @@ struct task_ctx {
 	u32			qrt_layer_id;
 	u32			qrt_llc_id;
 
-	u64			layer_refresh_seq;
-
 	u64			recheck_layer_membership;
 };
 
@@ -844,12 +841,14 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask, const struct layer *layer)
 {
 	bool prev_in_cand;
-	s32 i, cpu = -1;
+	s32 cpu = -1;
 
 	if (unlikely(!cand_cpumask || !idle_smtmask))
 		return -1;
 
 	prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
+	if (!prev_in_cand)
+		prev_cpu = -1;
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -911,9 +910,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 	if (layer_id >= MAX_LAYERS || !(layer_cpumask = lookup_layer_cpumask(layer_id)))
 		return -1;
-
-	if (layer->periodically_refresh && taskc->layer_refresh_seq < layer_refresh_seq_avgruntime)
-		taskc->refresh_layer = true;
 
 	/*
 	 * Not much to do if bound to a single CPU. Explicitly handle migration
@@ -2268,7 +2264,6 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 		return;
 
 	taskc->refresh_layer = false;
-	taskc->layer_refresh_seq = layer_refresh_seq_avgruntime;
 
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
 		return;
