@@ -20,8 +20,6 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
-use libc;
-
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -148,7 +146,6 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -182,7 +179,6 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -222,7 +218,6 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -260,7 +255,6 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -657,10 +651,6 @@ struct Opts {
     /// turns this off.
     #[clap(long, default_value = "2000")]
     layer_refresh_ms_avgruntime: u64,
-
-    /// Set the path for pinning the task hint map.
-    #[clap(long, default_value = "")]
-    task_hint_map: String,
 
     /// Print the config (after template expansion) and exit.
     #[clap(long, default_value = "false")]
@@ -1698,7 +1688,6 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
-                    placement,
                     member_expire_ms,
                     ..
                 } = spec.kind.common();
@@ -1743,19 +1732,6 @@ impl<'a> Scheduler<'a> {
                     }
                     layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
-
-                let task_place = |place: u32| crate::types::layer_task_place(place);
-                layer.task_place = match placement {
-                    LayerPlacement::Standard => {
-                        task_place(bpf_intf::layer_task_place_PLACEMENT_STD as u32)
-                    }
-                    LayerPlacement::Sticky => {
-                        task_place(bpf_intf::layer_task_place_PLACEMENT_STICK as u32)
-                    }
-                    LayerPlacement::Floating => {
-                        task_place(bpf_intf::layer_task_place_PLACEMENT_FLOAT as u32)
-                    }
-                };
             }
 
             layer.is_protected.write(match spec.kind {
@@ -2113,7 +2089,6 @@ impl<'a> Scheduler<'a> {
         opts: &'a Opts,
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
-        hint_to_layer_map: &HashMap<u64, HintLayerInfo>,
         membw_tracking: bool,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
@@ -2359,18 +2334,6 @@ impl<'a> Scheduler<'a> {
         }
         skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids = nr_layers as u32;
 
-        // We set the pin path before loading the skeleton. This will ensure
-        // libbpf creates and pins the map, or reuses the pinned map fd for us,
-        // so that we can keep reusing the older map already pinned on scheduler
-        // restarts.
-        let layered_task_hint_map_path = &opts.task_hint_map;
-        let hint_map = &mut skel.maps.scx_layered_task_hint_map;
-        // Only set pin path if a path is provided.
-        if layered_task_hint_map_path.is_empty() == false {
-            hint_map.set_pin_path(layered_task_hint_map_path).unwrap();
-            rodata.task_hint_map_enabled = true;
-        }
-
         if !opts.hi_fb_thread_name.is_empty() {
             let bpf_hi_fb_thread_name = &mut rodata.hi_fb_thread_name;
             copy_into_cstr(bpf_hi_fb_thread_name, opts.hi_fb_thread_name.as_str());
@@ -2381,34 +2344,6 @@ impl<'a> Scheduler<'a> {
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
-
-        // Populate the mapping of hints to layer IDs for faster lookups
-        if hint_to_layer_map.len() != 0 {
-            for (k, v) in hint_to_layer_map.iter() {
-                let key: u32 = *k as u32;
-
-                // Create hint_layer_info struct
-                let mut info_bytes = vec![0u8; std::mem::size_of::<bpf_intf::hint_layer_info>()];
-                let info_ptr = info_bytes.as_mut_ptr() as *mut bpf_intf::hint_layer_info;
-                unsafe {
-                    (*info_ptr).layer_id = v.layer_id as u32;
-                    (*info_ptr).system_cpu_util_below = match v.system_cpu_util_below {
-                        Some(threshold) => (threshold * 10000.0) as u64,
-                        None => u64::MAX, // disabled sentinel
-                    };
-                    (*info_ptr).dsq_insert_below = match v.dsq_insert_below {
-                        Some(threshold) => (threshold * 10000.0) as u64,
-                        None => u64::MAX, // disabled sentinel
-                    };
-                }
-
-                skel.maps.hint_to_layer_id_map.update(
-                    &key.to_ne_bytes(),
-                    &info_bytes,
-                    libbpf_rs::MapFlags::ANY,
-                )?;
-            }
-        }
 
         if membw_tracking {
             create_perf_fds(&mut skel, event)?;
@@ -2451,18 +2386,6 @@ impl<'a> Scheduler<'a> {
         // BPF. It would be better to update the cpumasks here before we
         // attach, but the value will quickly converge anyways so it's not a
         // huge problem in the interim until we figure it out.
-
-        // Allow all tasks to open and write to BPF task hint map, now that
-        // we should have it pinned at the desired location.
-        if layered_task_hint_map_path.is_empty() == false {
-            let path = CString::new(layered_task_hint_map_path.as_bytes()).unwrap();
-            let mode: libc::mode_t = 0o666;
-            unsafe {
-                if libc::chmod(path.as_ptr(), mode) != 0 {
-                    trace!("'chmod' to 666 of task hint map failed, continuing...");
-                }
-            }
-        }
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
@@ -3116,15 +3039,7 @@ fn write_example_file(path: &str) -> Result<()> {
     Ok(f.write_all(serde_json::to_string_pretty(&*EXAMPLE_CONFIG)?.as_bytes())?)
 }
 
-struct HintLayerInfo {
-    layer_id: usize,
-    system_cpu_util_below: Option<f64>,
-    dsq_insert_below: Option<f64>,
-}
-
-fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>> {
-    let hint_to_layer_map = HashMap::<u64, (usize, String, Option<f64>, Option<f64>)>::new();
-
+fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
     let nr_specs = specs.len();
     if nr_specs == 0 {
         bail!("No layer spec");
@@ -3218,19 +3133,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
         }
     }
 
-    Ok(hint_to_layer_map
-        .into_iter()
-        .map(|(k, v)| {
-            (
-                k,
-                HintLayerInfo {
-                    layer_id: v.0,
-                    system_cpu_util_below: v.2,
-                    dsq_insert_below: v.3,
-                },
-            )
-        })
-        .collect())
+    Ok(())
 }
 
 fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
@@ -3485,7 +3388,7 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
-    let hint_to_layer_map = verify_layer_specs(&layer_config.specs)?;
+    verify_layer_specs(&layer_config.specs)?;
 
     let mut open_object = MaybeUninit::uninit();
     loop {
@@ -3493,7 +3396,6 @@ fn main(opts: Opts) -> Result<()> {
             &opts,
             &layer_config.specs,
             &mut open_object,
-            &hint_to_layer_map,
             membw_required,
         )?;
         if !sched.run(shutdown.clone())?.should_restart() {

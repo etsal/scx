@@ -274,28 +274,8 @@ struct layer_match_ands {
 };
 
 enum layer_growth_algo {
-	GROWTH_ALGO_STICKY,
-	GROWTH_ALGO_LINEAR,
-	GROWTH_ALGO_REVERSE,
-	GROWTH_ALGO_RANDOM,
-	GROWTH_ALGO_TOPO,
-	GROWTH_ALGO_ROUND_ROBIN,
-	GROWTH_ALGO_BIG_LITTLE,
-	GROWTH_ALGO_LITTLE_BIG,
-	GROWTH_ALGO_NODE_SPREAD,
 	GROWTH_ALGO_NODE_SPREAD_REVERSE,
 	GROWTH_ALGO_NODE_SPREAD_RANDOM,
-	GROWTH_ALGO_CPUSET_SPREAD,
-	GROWTH_ALGO_CPUSET_SPREAD_REVERSE,
-	GROWTH_ALGO_CPUSET_SPREAD_RANDOM,
-	GROWTH_ALGO_RANDOM_TOPO,
-	GROWTH_ALGO_STICKY_DYNAMIC,
-};
-
-enum layer_task_place {
-	PLACEMENT_STD,
-	PLACEMENT_STICK,
-	PLACEMENT_FLOAT,
 };
 
 struct layer {
@@ -336,25 +316,12 @@ struct layer {
 
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;
-	enum layer_task_place   task_place;
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
 	bool			periodically_refresh;
 	u8			cpuset[MAX_CPUS_U8];
 	u64			member_expire_ms;
-};
-
-struct scx_cmd {
-	u16			prefix;
-	u8 			opcode;
-	u8			cmd[SCXCMD_COMLEN];
-} __attribute__((packed));
-
-struct hint_layer_info {
-	u32			layer_id;
-	u64			system_cpu_util_below;	/* ratio * 10000, u64::MAX = disabled */
-	u64			dsq_insert_below;	/* ratio * 10000, u64::MAX = disabled */
 };
 
 #endif /* __INTF_H */

@@ -94,28 +94,6 @@ u32 nr_empty_layer_ids;
 
 UEI_DEFINE(uei);
 
-struct task_hint {
-	u64 hint;
-	u64 __reserved[3];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_hint);
-} scx_layered_task_hint_map SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct hint_layer_info);
-	__uint(map_flags, 0);
-	__uint(max_entries, 1025);
-} hint_to_layer_id_map SEC(".maps");
-
-const volatile bool task_hint_map_enabled;
-
 /* EWMA value updated from userspace */
 u64 system_cpu_util_ewma = 0;
 u64 layer_dsq_insert_ewma[MAX_LAYERS];
@@ -601,7 +579,6 @@ struct task_ctx {
 	u32			qrt_layer_id;
 	u32			qrt_llc_id;
 
-	char 			join_layer[SCXCMD_COMLEN];
 	u64			layer_refresh_seq;
 
 	u64			recheck_layer_membership;
@@ -633,93 +610,7 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
-static struct task_hint *lookup_task_hint(struct task_struct *p)
-{
-	struct task_hint *hint;
-
-	if (!task_hint_map_enabled)
-		return NULL;
-	hint = bpf_task_storage_get(&scx_layered_task_hint_map, p, NULL, 0);
-	/* Only values in the range [0, 1024] are valid hints. */
-	if (hint && hint->hint > 1024)
-		hint = NULL;
-	return hint;
-}
-
-static struct hint_layer_info *lookup_task_hint_layer_id(struct task_struct *p) {
-	struct task_hint *hint;
-	u32 hint_val;
-
-	hint = lookup_task_hint(p);
-	if (!hint)
-		return NULL;
-
-	hint_val = hint->hint;
-	return bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
-}
-
 static void switch_to_layer(struct task_struct *, struct task_ctx *, u64 layer_id, u64 now);
-
-static bool is_task_layer_hint_stale(struct task_struct *p, struct task_ctx *taskc)
-{
-	struct hint_layer_info *info;
-
-	if (!task_hint_map_enabled)
-		return false;
-
-	info = lookup_task_hint_layer_id(p);
-	if (!info)
-		return false;
-	return taskc->layer_id != info->layer_id;
-}
-
-static void maybe_refresh_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
-{
-	struct hint_layer_info *info;
-	bool switch_layer = false;
-
-	if (!task_hint_map_enabled)
-		return;
-
-	/* We are already going to refresh this task, skip. */
-	if (taskc->refresh_layer)
-		return;
-
-	info = lookup_task_hint_layer_id(p);
-	if (!info)
-		return;
-
-	/*
-	 * We need to check whether the task layer matches the HintEquals specification,
-	 * additionally qualified by predicates gating layer admission.
-	 */
-	if (taskc->layer_id != info->layer_id)
-		switch_layer = true;
-
-	if (info->system_cpu_util_below != (u64)-1) {
-		if (system_cpu_util_ewma >= info->system_cpu_util_below) {
-			/*
-			 * Refresh task so that it gets evicted out. It only needs
-			 * to be done for tasks in the current layer, for incoming
-			 * tasks we just reject admission.
-			 */
-			taskc->refresh_layer = switch_layer == false;
-			switch_layer = false;
-		}
-	}
-
-	if (info->dsq_insert_below != (u64)-1 && taskc->layer_id < MAX_LAYERS) {
-		if (layer_dsq_insert_ewma[taskc->layer_id] >= info->dsq_insert_below) {
-			/* Same idea as above. */
-			taskc->refresh_layer = switch_layer == false;
-			switch_layer = false;
-		}
-	}
-
-	/* All conditions satisfied for layer matching. */
-	if (switch_layer)
-		switch_to_layer(p, taskc, info->layer_id, scx_bpf_now());
-}
 
 int save_gpu_tgid_pid(void) {
 	if (!enable_gpu_support)
@@ -843,41 +734,10 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 	return 0;
 }
 
-static int handle_cmd(struct task_ctx *taskc, struct scx_cmd *cmd)
-{
-
-	_Static_assert(sizeof(*cmd) == MAX_COMM, "scx_cmd has wrong size");
-
-	/* Is this a valid command? */
-	if (cmd->prefix != SCXCMD_PREFIX)
-		return 0;
-
-	switch (cmd->opcode) {
-	case SCXCMD_OP_NONE:
-		break;
-
-	case SCXCMD_OP_JOIN:
-		__builtin_memcpy(taskc->join_layer, cmd->cmd, SCXCMD_COMLEN);
-		break;
-
-	case SCXCMD_OP_LEAVE:
-		__builtin_memset(taskc->join_layer, 0, SCXCMD_COMLEN);
-		break;
-
-	default:
-		break;
-	}
-
-	return 0;
-}
-
-
 SEC("tp_btf/task_rename")
 int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 {
 	struct task_ctx *taskc;
-	struct scx_cmd cmd;
-	int ret;
 
 	if (!(taskc = lookup_task_ctx_may_fail(p))) {
 		bpf_printk("could not find task on rename");
@@ -885,14 +745,6 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 	}
 
 	taskc->refresh_layer = true;
-
-	ret = bpf_probe_read_str(&cmd, sizeof(cmd), buf);
-	if (ret < 0) {
-		bpf_printk("could not new task name on rename");
-		return -EINVAL;
-	}
-
-	handle_cmd(taskc, &cmd);
 
 	return 0;
 }
@@ -1100,62 +952,11 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 }
 
 static __always_inline
-s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
-			 const struct cpumask *idle_smtmask, s32 prev_cpu)
-{
-	s32 cpu = -1;
-
-	if (!has_little_cores || !big_cpumask)
-		return cpu;
-
-	struct bpf_cpumask *tmp_cpumask;
-	if (!taskc->layered_mask || !big_cpumask)
-		return cpu;
-
-	if (!(tmp_cpumask = bpf_cpumask_create()))
-		return cpu;
-
-	switch (layer->growth_algo) {
-	case GROWTH_ALGO_BIG_LITTLE: {
-		if (!taskc->layered_mask || !big_cpumask)
-			goto out_put;
-
-		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
-				cast_mask(big_cpumask));
-		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask, layer);
-		goto out_put;
-	}
-	case GROWTH_ALGO_LITTLE_BIG: {
-		bpf_cpumask_setall(tmp_cpumask);
-		if (!tmp_cpumask || !big_cpumask)
-			goto out_put;
-		bpf_cpumask_xor(tmp_cpumask, cast_mask(big_cpumask),
-				cast_mask(tmp_cpumask));
-		if (!tmp_cpumask || !taskc->layered_mask)
-			goto out_put;
-		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
-				cast_mask(tmp_cpumask));
-		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask, layer);
-		goto out_put;
-	}
-	default:
-		goto out_put;
-	}
-
-out_put:
-	bpf_cpumask_release(tmp_cpumask);
-	return cpu;
-}
-
-static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
 		  bool from_selcpu)
 {
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
-	bool is_float = layer->task_place == PLACEMENT_FLOAT;
 	struct bpf_cpumask *unprot_mask;
 	struct cpu_ctx *prev_cpuc;
 	u32 layer_id = layer->id;
@@ -1172,7 +973,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * Not much to do if bound to a single CPU. Explicitly handle migration
 	 * disabled tasks for kernels before SCX_OPS_ENQ_MIGRATION_DISABLED.
 	 */
-	if (!is_float && (p->nr_cpus_allowed == 1 || is_migration_disabled(p))) {
+	if ((p->nr_cpus_allowed == 1 || is_migration_disabled(p))) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			if (layer->kind == LAYER_KIND_CONFINED &&
 			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
@@ -1240,17 +1041,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return -1;
 
-	if (is_float)
-		goto no_locality;
-
-	/*
-	 * If the system has a big/little architecture and uses any related
-	 * layer growth algos try to find a cpu in that topology first.
-	 */
-	cpu = pick_idle_big_little(layer, taskc, idle_smtmask, prev_cpu);
-	if (cpu >=0)
-		goto out_put;
-
 	/*
 	 * Try a CPU in the previous LLC.
 	 */
@@ -1274,7 +1064,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		}
 	}
 
-no_locality:
 	/*
 	 * Next try a CPU in the current node
 	 */
@@ -1365,7 +1154,6 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
-	maybe_refresh_task_layer_from_hint(p, taskc);
 	/*
 	 * We usually update the layer in layered_runnable() to avoid confusion.
 	 * As layered_select_cpu() takes place before runnable, new tasks would
@@ -1374,10 +1162,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
 		return prev_cpu;
 
-	if (layer->task_place == PLACEMENT_STICK)
-		cpu = prev_cpu;
-	else
-		cpu = pick_idle_cpu(p, prev_cpu, cpuc, taskc, layer, true);
+	cpu = pick_idle_cpu(p, prev_cpu, cpuc, taskc, layer, true);
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
@@ -1569,10 +1354,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
-
-	/* Only invoke if we never went through select_cpu path. */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
-		maybe_refresh_task_layer_from_hint(p, taskc);
 
 	layer_id = taskc->layer_id;
 	if (!(layer = lookup_layer(layer_id)))
@@ -2302,8 +2083,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 * Do not refresh the slice in case we need the task to be reenqueued
 		 * for layer membership change and subsequent CPU selection.
 		 */
-		if (is_task_layer_hint_stale(prev, prev_taskc))
-			return;
 		prev->scx.slice = prev_layer->slice_ns;
 		return;
 	}
@@ -2446,7 +2225,7 @@ replenish:
          * Do not refresh the slice in case we need the task to be reenqueued
          * for layer membership change and subsequent CPU selection.
          */
-        if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc))
+        if (prev_taskc && prev_layer)
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
