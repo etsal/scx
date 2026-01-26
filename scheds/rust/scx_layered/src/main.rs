@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::ThreadId;
+use std::process::Command;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -4288,6 +4289,22 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     skel.maps.rodata_data.as_mut().unwrap().membw_event = config;
 
     Ok(config)
+}
+
+fn run_ls_command() -> Result<()> {
+    let status = Command::new("ls")
+        .status()
+        .context("Failed to execute ls command")?;
+
+    if let Some(code) = status.code() {
+        if code != 0 {
+            warn!("ls command exited with non-zero status: {}", code);
+        }
+    } else {
+        warn!("ls command terminated by signal");
+    }
+
+    Ok(())
 }
 
 #[clap_main::clap_main]
