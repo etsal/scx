@@ -19,7 +19,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::ThreadId;
-use std::process::Command;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -4291,18 +4290,11 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     Ok(config)
 }
 
-fn run_ls_command() -> Result<()> {
-    let status = Command::new("ls")
-        .status()
-        .context("Failed to execute ls command")?;
-
-    if let Some(code) = status.code() {
-        if code != 0 {
-            warn!("ls command exited with non-zero status: {}", code);
-        }
-    } else {
-        warn!("ls command terminated by signal");
-    }
+fn write_irq_affinity(irq: i32, cpus: &Cpumask) -> Result<()> {
+    let path = format!("/proc/irq/{}/smp_affinity_list", irq);
+    let cpu_list = cpus.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
+    fs::write(&path, &cpu_list)
+        .with_context(|| format!("Failed to write to {}", path))?;
 
     Ok(())
 }
