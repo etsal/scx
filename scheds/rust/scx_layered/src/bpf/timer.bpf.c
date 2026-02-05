@@ -1,13 +1,6 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 
-#ifdef LSP
-#ifndef __bpf__
-#define __bpf__
-#endif
-#include "../../../../include/scx/common.bpf.h"
-#else
 #include <scx/common.bpf.h>
-#endif
 
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>

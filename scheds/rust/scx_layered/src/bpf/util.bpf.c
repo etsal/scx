@@ -1,12 +1,4 @@
-
-#ifdef LSP
-#ifndef __bpf__
-#define __bpf__
-#endif
-#include "../../../../include/scx/common.bpf.h"
-#else
 #include <scx/common.bpf.h>
-#endif
 
 #include <errno.h>
 #include <stdbool.h>
