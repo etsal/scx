@@ -485,7 +485,7 @@ pub struct SysStats {
 }
 
 impl SysStats {
-    pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
+    pub fn new(stats: &Stats, _bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx];
         let total = lsum(LSTAT_SEL_LOCAL)
             + lsum(LSTAT_ENQ_LOCAL)
