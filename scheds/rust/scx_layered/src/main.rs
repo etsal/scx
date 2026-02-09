@@ -714,6 +714,17 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
+/// Get a mutable slice of arena-resident BPF layers via the BSS layers_ptr.
+fn bpf_layers<'a>(skel: &'a mut BpfSkel) -> &'a mut [types::layer] {
+    let ptr = skel.maps.bss_data.as_ref().unwrap().layers_ptr;
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            std::ptr::with_exposed_provenance_mut::<types::layer>(ptr as usize),
+            MAX_LAYERS,
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct BpfStats {
     gstats: Vec<u64>,
@@ -964,21 +975,13 @@ impl Stats {
         let elapsed_f64 = elapsed.as_secs_f64();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
-        let nr_layer_tasks: Vec<usize> = skel
-            .arena
-            .as_ref()
-            .unwrap()
-            .layers
+        let layers = bpf_layers(skel);
+        let nr_layer_tasks: Vec<usize> = layers
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
             .collect();
-        let layer_slice_us: Vec<u64> = skel
-            .maps
-            .arena
-            .as_ref()
-            .unwrap()
-            .layers
+        let layer_slice_us: Vec<u64> = layers
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.slice_ns / 1000_u64)
@@ -1573,19 +1576,48 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init_layers(
+    /// Pre-load layer initialization: sets rodata fields that must be configured
+    /// before the skeleton is loaded.
+    fn init_layers_preload(
         skel: &mut OpenBpfSkel,
+        specs: &[LayerSpec],
+    ) -> Result<()> {
+        skel.maps.rodata_data.as_mut().unwrap().nr_layers = specs.len() as u32;
+
+        let layer_weights: Vec<usize> = specs
+            .iter()
+            .map(|spec| spec.kind.common().weight as usize)
+            .collect();
+
+        let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
+        layer_iteration_order.sort_by(|i, j| layer_weights[*i].cmp(&layer_weights[*j]));
+        for (idx, layer_idx) in layer_iteration_order.iter().enumerate() {
+            skel.maps
+                .rodata_data
+                .as_mut()
+                .unwrap()
+                .layer_iteration_order[idx] = *layer_idx as u32;
+        }
+
+        let perf_set = specs.iter().any(|spec| spec.kind.common().perf > 0);
+        if perf_set && !compat::ksym_exists("scx_bpf_cpuperf_set")? {
+            warn!("cpufreq support not available, ignoring perf configurations");
+        }
+
+        Ok(())
+    }
+
+    /// Post-load layer initialization: writes layer config into arena memory.
+    /// Must be called after the skeleton is loaded and layers_ptr is set.
+    fn init_layers(
+        skel: &mut BpfSkel,
         specs: &[LayerSpec],
         topo: &Topology,
     ) -> Result<()> {
-        skel.maps.rodata_data.as_mut().unwrap().nr_layers = specs.len() as u32;
-        let mut perf_set = false;
-
-        let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
-        let mut layer_weights: Vec<usize> = vec![];
+        let bpf_layers = bpf_layers(skel);
 
         for (spec_i, spec) in specs.iter().enumerate() {
-            let layer = &mut skel.maps.bss_data.as_mut().unwrap().layers[spec_i];
+            let layer = &mut bpf_layers[spec_i];
 
             for (or_i, or) in spec.matches.iter().enumerate() {
                 for (and_i, and) in or.iter().enumerate() {
@@ -1658,7 +1690,6 @@ impl<'a> Scheduler<'a> {
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.member_expire_ms = *member_expire_ms;
-                layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
                 for (topo_node_id, topo_node) in &topo.nodes {
@@ -1686,21 +1717,6 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             };
-
-            perf_set |= layer.perf > 0;
-        }
-
-        layer_iteration_order.sort_by(|i, j| layer_weights[*i].cmp(&layer_weights[*j]));
-        for (idx, layer_idx) in layer_iteration_order.iter().enumerate() {
-            skel.maps
-                .rodata_data
-                .as_mut()
-                .unwrap()
-                .layer_iteration_order[idx] = *layer_idx as u32;
-        }
-
-        if perf_set && !compat::ksym_exists("scx_bpf_cpuperf_set")? {
-            warn!("cpufreq support not available, ignoring perf configurations");
         }
 
         Ok(())
@@ -2249,10 +2265,19 @@ impl<'a> Scheduler<'a> {
             rodata.enable_hi_fb_thread_name_match = true;
         }
 
-        Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        Self::init_layers_preload(&mut skel, &layer_specs)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
+
+        // Initialize the arena layers pointer by running the BPF syscall program.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let _ = skel.progs.layered_init_layers_ptr.test_run(input);
+
+        // Now that the arena is mmap'd and layers_ptr is set, write layer config.
+        Self::init_layers(&mut skel, &layer_specs, &topo)?;
 
         if membw_tracking {
             create_perf_fds(&mut skel, event)?;
@@ -2673,7 +2698,7 @@ impl<'a> Scheduler<'a> {
             if freed {
                 Self::update_bpf_layer_cpumask(
                     layer,
-                    &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                    &mut bpf_layers(&mut self.skel)[idx],
                 );
                 updated = true;
             }
@@ -2711,7 +2736,7 @@ impl<'a> Scheduler<'a> {
             if alloced {
                 Self::update_bpf_layer_cpumask(
                     layer,
-                    &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                    &mut bpf_layers(&mut self.skel)[idx],
                 );
                 updated = true;
             }
@@ -2724,7 +2749,7 @@ impl<'a> Scheduler<'a> {
                     continue;
                 }
 
-                let bpf_layer = &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx];
+                let bpf_layer = &mut bpf_layers(&mut self.skel)[idx];
                 let available_cpus = self.cpu_pool.available_cpus().and(&layer.allowed_cpus);
                 let nr_available_cpus = available_cpus.weight();
 

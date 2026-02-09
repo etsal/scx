@@ -79,6 +79,7 @@ u64 unprotected_seq = 0;
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer __arena layers[MAX_LAYERS];
+u64 layers_ptr;
 u32 fallback_cpu;
 u32 layered_root_tgid = 0;
 
@@ -3394,6 +3395,13 @@ void BPF_STRUCT_OPS(layered_exit, struct scx_exit_info *ei)
 		scx_pmu_uninstall(membw_event);
 
 	UEI_RECORD(uei, ei);
+}
+
+SEC("syscall")
+int layered_init_layers_ptr(void *ctx)
+{
+	layers_ptr = (u64)layers;
+	return 0;
 }
 
 SCX_OPS_DEFINE(layered,

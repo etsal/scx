@@ -92,7 +92,7 @@ bool __noinline match_prefix(const char __arg_arena __arena *prefix, const char 
 		return false;
 	}
 
-	if (bpf_probe_read_kernel_str(&str_buf, MAX_PATH, str) < 0) {
+	if (bpf_probe_read_kernel_str(str_buf, MAX_PATH, str) < 0) {
 		scx_bpf_error("could not read kernel str");
 		return false;
 	};
