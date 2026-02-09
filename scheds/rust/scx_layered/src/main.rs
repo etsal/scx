@@ -33,10 +33,12 @@ use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::Skel as _;
 use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
+use scx_arena::ArenaLib;
 use scx_bpf_compat;
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
@@ -2269,6 +2271,11 @@ impl<'a> Scheduler<'a> {
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
+
+        // Initialize the arena library (static allocator, bitmap subsystem,
+        // per-CPU storage, per-task allocator, and topology).
+        let arenalib = ArenaLib::init(skel.object_mut(), 0, *NR_CPU_IDS)?;
+        arenalib.setup()?;
 
         // Initialize the arena layers pointer by running the BPF syscall program.
         let input = ProgramInput {

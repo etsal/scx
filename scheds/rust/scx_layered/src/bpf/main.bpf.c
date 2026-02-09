@@ -12,6 +12,10 @@
 
 #include <lib/arena_map.h>
 #include <lib/pmu.h>
+#include <lib/cpumask.h>
+#include <lib/percpu.h>
+#include <lib/sdt_task.h>
+#include <lib/arena.h>
 
 #include "intf.h"
 #include "timer.bpf.h"
@@ -26,7 +30,7 @@ static u32 do_refresh_layer_cpumasks = 0;
 const volatile u32 debug;
 const volatile u64 slice_ns;
 const volatile u64 max_exec_ns;
-const volatile u32 nr_cpu_ids = 1;
+extern const volatile u32 nr_cpu_ids;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 llc_numa_id_map[MAX_LLCS];
@@ -3401,6 +3405,12 @@ SEC("syscall")
 int layered_init_layers_ptr(void *ctx)
 {
 	layers_ptr = (u64)layers;
+	return 0;
+}
+
+SEC("syscall")
+int layered_arena_setup(void *ctx)
+{
 	return 0;
 }
 
