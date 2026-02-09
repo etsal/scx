@@ -77,11 +77,11 @@ typedef struct layer __arena layer;
 typedef struct layer_match __arena layer_match;
 typedef struct layer_match_ands __arena layer_match_ands;
 
-private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
+scx_bitmap_t unprotected_cpumask;
 u64 unprotected_seq = 0;
 
-private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
-private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
+scx_bitmap_t all_cpumask;
+scx_bitmap_t big_cpumask;
 struct layer __arena layers[MAX_LAYERS];
 u64 layers_ptr;
 u32 fallback_cpu;
@@ -299,41 +299,22 @@ static void lstat_inc(u32 id, layer *layer, struct cpu_ctx *cpuc)
 	lstat_add(id, layer, cpuc, 1);
 }
 
-struct layer_cpumask_wrapper {
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *cpuset;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct layer_cpumask_wrapper);
-	__uint(max_entries, MAX_LAYERS);
-	__uint(map_flags, 0);
-} layer_cpumasks SEC(".maps");
-
-static struct cpumask *lookup_layer_cpumask(u32 layer_id)
+static scx_bitmap_t lookup_layer_cpumask(u32 layer_id)
 {
-	struct layer_cpumask_wrapper *cpumaskw;
-
-	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
-		return (struct cpumask *)cpumaskw->cpumask;
-	} else {
+	if (layer_id >= nr_layers) {
 		scx_bpf_error("no layer_cpumask for layer %d", layer_id);
 		return NULL;
 	}
+	return (scx_bitmap_t)layers[layer_id].arena_cpumask;
 }
 
-static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
+static scx_bitmap_t lookup_layer_cpuset(u32 layer_id)
 {
-	struct layer_cpumask_wrapper *cpumaskw;
-
-	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
-		return cpumaskw->cpuset;
-	} else {
+	if (layer_id >= nr_layers) {
 		scx_bpf_error("no layer_cpuset for layer %d", layer_id);
 		return NULL;
 	}
+	return (scx_bitmap_t)layers[layer_id].arena_cpuset;
 }
 
 static void layer_llc_drain_enable(layer *layer, u32 llc_id)
@@ -363,46 +344,41 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, layer *layer)
 
 	/* The mask tracks _unprotected_ CPUs to simplify bitops. */
 	if (cpuc->is_protected)
-		bpf_cpumask_clear_cpu(cpuc->cpu, unprotected_cpumask);
+		scx_bitmap_clear_cpu(cpuc->cpu, unprotected_cpumask);
 	else
-		bpf_cpumask_set_cpu(cpuc->cpu, unprotected_cpumask);
+		scx_bitmap_set_cpu(cpuc->cpu, unprotected_cpumask);
 
 	return true;
 }
 
 /*
- * Create a bpf_cpumask for the layer out of the serialized cpuset store by userspace.
+ * Create an scx_bitmap for the layer out of the serialized cpuset stored by userspace.
  * Deserialization logic identical to refresh_cpumasks.
  */
 static void layer_cpuset_bpfmask(int layer_id)
 {
-	struct bpf_cpumask *layer_cpuset;
+	scx_bitmap_t layer_cpuset;
 	u8 __arena *u8_ptr;
 	int cpu;
 
-	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		u8_ptr = &layers[layer_id].cpuset[cpu / 8];
 		if (!u8_ptr) {
-			bpf_rcu_read_unlock();
 			scx_bpf_error("could not find cpuset byte");
 			return;
 		}
 
 		layer_cpuset = lookup_layer_cpuset(layer_id);
 		if (!layer_cpuset) {
-			bpf_rcu_read_unlock();
 			scx_bpf_error("uninitialized cpuset");
 			return;
 		}
 
 		if (*u8_ptr & (1 << (cpu % 8)))
-			bpf_cpumask_set_cpu(cpu, layer_cpuset);
+			scx_bitmap_set_cpu(cpu, layer_cpuset);
 		else
-			bpf_cpumask_clear_cpu(cpu, layer_cpuset);
+			scx_bitmap_clear_cpu(cpu, layer_cpuset);
 	}
-
-	bpf_rcu_read_unlock();
 }
 
 /*
@@ -410,8 +386,7 @@ static void layer_cpuset_bpfmask(int layer_id)
  */
 __weak s32 refresh_cpumasks(u32 layer_id)
 {
-	struct bpf_cpumask *layer_cpumask;
-	struct layer_cpumask_wrapper *cpumaskw;
+	scx_bitmap_t layer_cpumask;
 	bool protected_changed = false;
 	layer *layer;
 	struct cpu_ctx *cpuc;
@@ -426,10 +401,8 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
 		return 0;
 
-	bpf_rcu_read_lock();
-	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
-	    !(layer_cpumask = cpumaskw->cpumask)) {
-		bpf_rcu_read_unlock();
+	layer_cpumask = lookup_layer_cpumask(layer_id);
+	if (!layer_cpumask) {
 		scx_bpf_error("can't happen");
 		return 0;
 	}
@@ -437,16 +410,14 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		u8 __arena *u8_ptr;
 
-		if (!(cpuc = lookup_cpu_ctx(cpu))) {
-			bpf_rcu_read_unlock();
+		if (!(cpuc = lookup_cpu_ctx(cpu)))
 			return 0;
-		}
 
 		if ((u8_ptr = &layers[layer_id].cpus[cpu / 8])) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
 				protected_changed = refresh_layer_cpuc(cpuc, layer) || protected_changed;
 
-				bpf_cpumask_set_cpu(cpu, layer_cpumask);
+				scx_bitmap_set_cpu(cpu, layer_cpumask);
 			} else {
 				if (layer->kind == LAYER_KIND_OPEN)
 					cpuc->in_open_layers = false;
@@ -454,14 +425,12 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 					cpuc->layer_id = MAX_LAYERS;
 					cpuc->in_open_layers = true;
 				}
-				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
+				scx_bitmap_clear_cpu(cpu, layer_cpumask);
 			}
 		} else {
 			scx_bpf_error("can't happen");
 		}
 	}
-
-	bpf_rcu_read_unlock();
 
 	if (protected_changed)
 		__sync_fetch_and_add(&unprotected_seq, 1);
@@ -510,8 +479,7 @@ SEC("syscall")
 int BPF_PROG(refresh_layer_cpumasks)
 {
 	if (!kfuncs_supported_in_syscall) {
-		// BACKPORT NOTE: We can't call `bpf_cpumask_{set,clear}_cpu` from a
-		// BPF_PROG. Set a flag and take care of it later.
+		// BACKPORT NOTE: Set a flag and take care of it later.
 		__sync_fetch_and_or(&do_refresh_layer_cpumasks, 1);
 		return 0;
 	}
@@ -536,13 +504,14 @@ struct task_ctx {
 	pid_t			last_waker;
 	bool			refresh_layer;
 	struct cached_cpus	layered_cpus;
-	struct bpf_cpumask __kptr *layered_mask;
+	scx_bitmap_t		layered_mask;
 	struct cached_cpus	layered_cpus_llc;
-	struct bpf_cpumask __kptr *layered_llc_mask;
+	scx_bitmap_t		layered_llc_mask;
 	struct cached_cpus	layered_cpus_node;
-	struct bpf_cpumask __kptr *layered_node_mask;
+	scx_bitmap_t		layered_node_mask;
 	struct cached_cpus	layered_cpus_unprotected;
-	struct bpf_cpumask __kptr *layered_unprotected_mask;
+	scx_bitmap_t		layered_unprotected_mask;
+	u8			cpus_allowed[MAX_CPUS_U8];
 	bool			all_cpuset_allowed;
 	bool			cpus_node_aligned;
 	u64			runnable_at;
@@ -746,10 +715,27 @@ static bool should_refresh_cached_cpus(struct cached_cpus *ccpus, s64 id, u64 cp
 }
 
 static __always_inline
-void refresh_cached_cpus(struct bpf_cpumask *mask,
+void refresh_cached_cpus_bitmap(scx_bitmap_t mask,
 			 struct cached_cpus *ccpus,
 			 s64 id, u64 cpus_seq,
-			 const struct cpumask *cpus_a,
+			 scx_bitmap_t cpus_a,
+			 scx_bitmap_t cpus_b)
+{
+	if (unlikely(!mask || !cpus_a || !cpus_b)) {
+		scx_bpf_error("NULL ccpus->mask or cpus_a/b");
+		return;
+	}
+
+	scx_bitmap_and(mask, cpus_a, cpus_b);
+	ccpus->id = id;
+	ccpus->seq = cpus_seq;
+}
+
+static __always_inline
+void refresh_cached_cpus_and_cpumask(scx_bitmap_t mask,
+			 struct cached_cpus *ccpus,
+			 s64 id, u64 cpus_seq,
+			 scx_bitmap_t cpus_a,
 			 const struct cpumask *cpus_b)
 {
 	if (unlikely(!mask || !cpus_a || !cpus_b)) {
@@ -757,30 +743,25 @@ void refresh_cached_cpus(struct bpf_cpumask *mask,
 		return;
 	}
 
-	/*
-	 * XXX - We're assuming that the updated @layer_cpumask matching the new
-	 * @layer_seq is visible which may not be true. For now, leave it as-is.
-	 * Let's update once BPF grows enough memory ordering constructs.
-	 */
-	bpf_cpumask_and(mask, cpus_a, cpus_b);
+	scx_bitmap_and_cpumask(mask, cpus_a, cpus_b);
 	ccpus->id = id;
 	ccpus->seq = cpus_seq;
 }
 
 static void maybe_refresh_layered_cpus(struct task_struct *p, struct task_ctx *taskc,
-				       const struct cpumask *layer_cpumask,
+				       scx_bitmap_t layer_cpumask,
 				       u64 cpus_seq)
 {
 	if (should_refresh_cached_cpus(&taskc->layered_cpus, 0, cpus_seq)) {
-		refresh_cached_cpus(taskc->layered_mask, &taskc->layered_cpus, 0, cpus_seq,
-				    p->cpus_ptr, layer_cpumask);
+		refresh_cached_cpus_and_cpumask(taskc->layered_mask, &taskc->layered_cpus, 0, cpus_seq,
+				    layer_cpumask, p->cpus_ptr);
 		trace("%s[%d] layered cpumask refreshed to seq=%llu",
 		      p->comm, p->pid, taskc->layered_cpus.seq);
 	}
 }
 
 static void maybe_refresh_layered_cpus_llc(struct task_struct *p, struct task_ctx *taskc,
-					   const struct cpumask *layer_cpumask,
+					   scx_bitmap_t layer_cpumask,
 					   s32 llc_id, u64 cpus_seq)
 {
 	if (should_refresh_cached_cpus(&taskc->layered_cpus_llc, llc_id, cpus_seq)) {
@@ -788,17 +769,17 @@ static void maybe_refresh_layered_cpus_llc(struct task_struct *p, struct task_ct
 
 		if (!(llcc = lookup_llc_ctx(llc_id)))
 			return;
-		refresh_cached_cpus(taskc->layered_llc_mask,
+		refresh_cached_cpus_bitmap(taskc->layered_llc_mask,
 				    &taskc->layered_cpus_llc, llc_id, cpus_seq,
-				    cast_mask(taskc->layered_mask),
-				    cast_mask(llcc->cpumask));
+				    taskc->layered_mask,
+				    (scx_bitmap_t)llcc->cpumask);
 		trace("%s[%d] layered llc cpumask refreshed to llc=%d seq=%llu",
 		      p->comm, p->pid, taskc->layered_cpus_llc.id, taskc->layered_cpus_llc.seq);
 	}
 }
 
 static void maybe_refresh_layered_cpus_node(struct task_struct *p, struct task_ctx *taskc,
-					    const struct cpumask *layer_cpumask,
+					    scx_bitmap_t layer_cpumask,
 					    s32 node_id, u64 cpus_seq)
 {
 	if (should_refresh_cached_cpus(&taskc->layered_cpus_node, node_id, cpus_seq)) {
@@ -806,19 +787,19 @@ static void maybe_refresh_layered_cpus_node(struct task_struct *p, struct task_c
 
 		if (!(nodec = lookup_node_ctx(node_id)))
 			return;
-		refresh_cached_cpus(taskc->layered_node_mask,
+		refresh_cached_cpus_bitmap(taskc->layered_node_mask,
 				    &taskc->layered_cpus_node, node_id, cpus_seq,
-				    cast_mask(taskc->layered_mask),
-				    cast_mask(nodec->cpumask));
+				    taskc->layered_mask,
+				    (scx_bitmap_t)nodec->cpumask);
 		trace("%s[%d] layered node cpumask refreshed to node=%d seq=%llu",
 		      p->comm, p->pid, taskc->layered_cpus_node.id, taskc->layered_cpus_node.seq);
 	}
 }
 
 static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct task_ctx *taskc,
-		const struct cpumask *layer_cpumask)
+		scx_bitmap_t layer_cpumask)
 {
-	struct bpf_cpumask *task_cpumask = taskc->layered_unprotected_mask;
+	scx_bitmap_t task_cpumask = taskc->layered_unprotected_mask;
 	u64 cpus_seq = READ_ONCE(unprotected_seq);
 
 	/* Do we have our own unprotected CPU mask? */
@@ -826,8 +807,8 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 		return;
 
 	if (should_refresh_cached_cpus(&taskc->layered_cpus_unprotected, 0, cpus_seq)) {
-		bpf_cpumask_or(task_cpumask, cast_mask(unprotected_cpumask), layer_cpumask);
-		bpf_cpumask_and(task_cpumask, cast_mask(task_cpumask), p->cpus_ptr);
+		scx_bitmap_or(task_cpumask, unprotected_cpumask, layer_cpumask);
+		scx_bitmap_and_cpumask(task_cpumask, task_cpumask, p->cpus_ptr);
 
 		taskc->layered_cpus_unprotected.id = 0;
 		taskc->layered_cpus_unprotected.seq = cpus_seq;
@@ -837,7 +818,7 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 	}
 }
 
-static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
+static s32 pick_idle_cpu_from(scx_bitmap_t cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask, const layer *layer)
 {
 	bool prev_in_cand;
@@ -846,7 +827,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	if (unlikely(!cand_cpumask || !idle_smtmask))
 		return -1;
 
-	prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
+	prev_in_cand = scx_bitmap_test_cpu(prev_cpu, cand_cpumask);
 	if (!prev_in_cand)
 		prev_cpu = -1;
 
@@ -863,7 +844,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 		}
 
 		// try any idle core
-		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
+		cpu = scx_bitmap_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
 			return cpu;
 	}
@@ -872,14 +853,14 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 		cpu = prev_cpu;
 	else
-		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, 0);
+		cpu = scx_bitmap_pick_idle_cpu(cand_cpumask, 0);
 
 	return cpu;
 }
 
 static __always_inline
 bool should_try_preempt_first(s32 cand, layer *layer,
-			      const struct cpumask *layered_cpumask)
+			      scx_bitmap_t layered_cpumask)
 {
 	struct cpu_ctx *cand_cpuc;
 
@@ -887,7 +868,7 @@ bool should_try_preempt_first(s32 cand, layer *layer,
 		return false;
 
 	if (layer->kind == LAYER_KIND_CONFINED &&
-	    !bpf_cpumask_test_cpu(cand, layered_cpumask))
+	    !scx_bitmap_test_cpu(cand, layered_cpumask))
 		return false;
 
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)) || cand_cpuc->current_preempt)
@@ -901,8 +882,9 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, layer *layer,
 		  bool from_selcpu)
 {
-	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
-	struct bpf_cpumask *unprot_mask;
+	const struct cpumask *idle_smtmask, *idle_cpumask;
+	scx_bitmap_t layer_cpumask, layered_cpumask;
+	scx_bitmap_t unprot_mask;
 	struct cpu_ctx *prev_cpuc;
 	u32 layer_id = layer->id;
 	u64 cpus_seq;
@@ -918,7 +900,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if ((p->nr_cpus_allowed == 1 || is_migration_disabled(p))) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			if (layer->kind == LAYER_KIND_CONFINED &&
-			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+			    !scx_bitmap_test_cpu(prev_cpu, layer_cpumask))
 				lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 			return prev_cpu;
 		} else {
@@ -935,7 +917,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * the preemption attempt fails.
 	 */
 	maybe_refresh_layered_cpus(p, taskc, layer_cpumask, cpus_seq);
-	if (!(layered_cpumask = cast_mask(taskc->layered_mask)))
+	layered_cpumask = taskc->layered_mask;
+	if (!layered_cpumask)
 		return -1;
 	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
 		cpuc->try_preempt_first = true;
@@ -949,10 +932,10 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (READ_ONCE(layer->check_no_idle)) {
 		bool has_idle;
-		cpumask = scx_bpf_get_idle_cpumask();
+		idle_cpumask = scx_bpf_get_idle_cpumask();
 
 		if (layer->kind == LAYER_KIND_CONFINED) {
-			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
+			has_idle = scx_bitmap_intersects_cpumask(layered_cpumask, idle_cpumask);
 		} else {
 			maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
 			/*
@@ -965,14 +948,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 			if (unlikely(!unprot_mask)) {
 				scx_bpf_error("unprotected_cpumask not initialized");
-				scx_bpf_put_idle_cpumask(cpumask);
+				scx_bpf_put_idle_cpumask(idle_cpumask);
 				return -1;
 			}
 
-			has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask);
+			has_idle = scx_bitmap_intersects_cpumask(unprot_mask, idle_cpumask);
 		}
 
-		scx_bpf_put_idle_cpumask(cpumask);
+		scx_bpf_put_idle_cpumask(idle_cpumask);
 		if (!has_idle)
 			return -1;
 	}
@@ -987,13 +970,15 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * Try a CPU in the previous LLC.
 	 */
 	if (nr_llcs > 1) {
+		scx_bitmap_t llc_mask;
 		maybe_refresh_layered_cpus_llc(p, taskc, layer_cpumask,
 					       prev_cpuc->llc_id, cpus_seq);
-		if (!(cpumask = cast_mask(taskc->layered_llc_mask))) {
+		llc_mask = taskc->layered_llc_mask;
+		if (!llc_mask) {
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
+		if ((cpu = pick_idle_cpu_from(llc_mask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
 	}
 
@@ -1001,13 +986,15 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * Next try a CPU in the current node
 	 */
 	if (nr_nodes > 1) {
+		scx_bitmap_t node_mask;
 		maybe_refresh_layered_cpus_node(p, taskc, layer_cpumask,
 						prev_cpuc->node_id, cpus_seq);
-		if (!(cpumask = cast_mask(taskc->layered_node_mask))) {
+		node_mask = taskc->layered_node_mask;
+		if (!node_mask) {
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
+		if ((cpu = pick_idle_cpu_from(node_mask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
 	}
 
@@ -1023,7 +1010,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	    if (!unprot_mask)
 		    unprot_mask = unprotected_cpumask;
 
-	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask, layer)) >= 0) {
+	    if ((cpu = pick_idle_cpu_from(unprot_mask, prev_cpu, idle_smtmask, layer)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	    }
@@ -1209,7 +1196,8 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 
 static void layer_kick_idle_cpu(layer *layer)
 {
-	const struct cpumask *layer_cpumask, *idle_smtmask;;
+	scx_bitmap_t layer_cpumask;
+	const struct cpumask *idle_smtmask;
 	s32 cpu;
 
 	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)) ||
@@ -1339,11 +1327,11 @@ skip_ddsp:
 	 */
 	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
 	    is_scheduler_task(p)) {
-		struct cpumask *layer_cpumask;
+		scx_bitmap_t layer_cpumask;
 
 		if (layer->kind == LAYER_KIND_CONFINED &&
 		    (layer_cpumask = lookup_layer_cpumask(taskc->layer_id)) &&
-		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
+		    !scx_bitmap_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
 		if (p->nr_cpus_allowed == 1) {
@@ -1615,11 +1603,11 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		if (layer->kind != LAYER_KIND_CONFINED) {
 			has_idle = !bpf_cpumask_empty(idle_cpumask);
 		} else {
-			struct cpumask *layer_cpumask;
+			scx_bitmap_t layer_cpumask;
 
 			if ((layer_cpumask = lookup_layer_cpumask(layer->id)))
-				has_idle = bpf_cpumask_intersects(idle_cpumask,
-								  layer_cpumask);
+				has_idle = scx_bitmap_intersects_cpumask(layer_cpumask,
+									idle_cpumask);
 		}
 
 		scx_bpf_put_idle_cpumask(idle_cpumask);
@@ -2268,48 +2256,23 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 		      taskc->layer_id, p->comm, p->pid, cgrp_path);
 }
 
-static s32 create_save_cpumask(struct bpf_cpumask **kptr)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(kptr, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
-	}
-
-	return 0;
-}
-
 static s32 create_node(u32 node_id)
 {
 	u32 cpu;
-	struct bpf_cpumask *cpumask;
+	scx_bitmap_t cpumask;
 	struct node_ctx *nodec;
 	struct cpu_ctx *cpuc;
-	s32 ret;
+	s32 ret = 0;
 
 	if (!(nodec = lookup_node_ctx(node_id)))
 		return -ENOENT;
 	nodec->id = node_id;
 
-	ret = create_save_cpumask(&nodec->cpumask);
-	if (ret)
-		return ret;
-
-	bpf_rcu_read_lock();
-	cpumask = nodec->cpumask;
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to lookup node cpumask");
-		return -ENOENT;
-	}
+	cpumask = scx_bitmap_alloc();
+	if (!cpumask)
+		return -ENOMEM;
+	scx_bitmap_clear(cpumask);
+	nodec->cpumask = (u64)cpumask;
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		const volatile u64 *nmask;
@@ -2322,7 +2285,7 @@ static s32 create_node(u32 node_id)
 		}
 
 		if (*nmask & (1LLU << (cpu % 64))) {
-			bpf_cpumask_set_cpu(cpu, cpumask);
+			scx_bitmap_set_cpu(cpu, cpumask);
 			if (!(cpuc = lookup_cpu_ctx(cpu))) {
 				scx_bpf_error("cpu ctx error");
 				ret = -ENOENT;
@@ -2336,38 +2299,30 @@ static s32 create_node(u32 node_id)
 	}
 
 	dbg("CFG creating node %d with %d cpus", node_id, nodec->nr_cpus);
-	bpf_rcu_read_unlock();
 	return ret;
 }
 
 static s32 create_llc(u32 llc_id)
 {
-	struct bpf_cpumask *cpumask;
+	scx_bitmap_t cpumask;
 	struct llc_ctx *llcc;
 	struct cpu_ctx *cpuc;
 	struct llc_prox_map *pmap;
 	u32 cpu;
-	s32 i, ret;
+	s32 i, ret = 0;
 
 	if (!(llcc = lookup_llc_ctx(llc_id)))
 		return -ENOENT;
 	llcc->id = llc_id;
 
-	ret = create_save_cpumask(&llcc->cpumask);
-	if (ret)
-		return ret;
-
-	bpf_rcu_read_lock();
-	cpumask = llcc->cpumask;
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to lookup node cpumask");
-		return -ENOENT;
-	}
+	cpumask = scx_bitmap_alloc();
+	if (!cpumask)
+		return -ENOMEM;
+	scx_bitmap_clear(cpumask);
+	llcc->cpumask = (u64)cpumask;
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(cpu))) {
-			bpf_rcu_read_unlock();
 			scx_bpf_error("cpu ctx error");
 			return -ENOENT;
 		}
@@ -2375,7 +2330,7 @@ static s32 create_llc(u32 llc_id)
 		if (cpu_to_llc_id(cpu) != llc_id)
 			continue;
 
-		bpf_cpumask_set_cpu(cpu, cpumask);
+		scx_bitmap_set_cpu(cpu, cpumask);
 		llcc->nr_cpus++;
 		cpuc->llc_id = llc_id;
 		cpuc->hi_fb_dsq_id = hi_fb_dsq_id(llc_id);
@@ -2383,7 +2338,6 @@ static s32 create_llc(u32 llc_id)
 	}
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
-	bpf_rcu_read_unlock();
 
 	pmap = &llcc->prox_map;
 	dbg("CFG: LLC[%d] prox_map node/sys=%d/%d",
@@ -2471,10 +2425,10 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (!(nodec = lookup_node_ctx(cpuc->node_id)))
 			return;
 		if (nodec->cpumask &&
-		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(nodec->cpumask)))
+		    !scx_bitmap_test_cpu(taskc->last_cpu, (scx_bitmap_t)nodec->cpumask))
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cpuc);
 		if (llcc->cpumask &&
-		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(llcc->cpumask)))
+		    !scx_bitmap_test_cpu(taskc->last_cpu, (scx_bitmap_t)llcc->cpumask))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cpuc);
 	}
 	taskc->last_cpu = task_cpu;
@@ -2605,29 +2559,31 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
-	const struct cpumask *cpuset;
+	scx_bitmap_t cpuset;
 	u32 node_id;
 
-	cpuset = (const struct cpumask *)lookup_layer_cpuset(taskc->layer_id);
+	cpuset = lookup_layer_cpuset(taskc->layer_id);
 	if (!cpuset) {
 		scx_bpf_error("no cpuset mask found");
 		return;
 	}
 
-	taskc->all_cpuset_allowed = bpf_cpumask_subset(cpuset, cpumask);
+	taskc->all_cpuset_allowed = scx_bitmap_subset_cpumask(cpuset, cpumask);
 	taskc->cpus_node_aligned = true;
 
 	bpf_for(node_id, 0, nr_nodes) {
 		struct node_ctx *nodec;
-		const struct cpumask *node_cpumask;
+		scx_bitmap_t node_cpumask;
 
-		if (!(nodec = lookup_node_ctx(node_id)) ||
-		    !(node_cpumask = cast_mask(nodec->cpumask)))
+		if (!(nodec = lookup_node_ctx(node_id)))
+			return;
+		node_cpumask = (scx_bitmap_t)nodec->cpumask;
+		if (!node_cpumask)
 			return;
 
 		/* not llc aligned if partially overlaps */
-		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
-		    !bpf_cpumask_subset(node_cpumask, cpumask)) {
+		if (scx_bitmap_intersects_cpumask(node_cpumask, cpumask) &&
+		    !scx_bitmap_subset_cpumask(node_cpumask, cpumask)) {
 			taskc->cpus_node_aligned = false;
 			break;
 		}
@@ -2643,7 +2599,7 @@ static int init_cached_cpus(struct cached_cpus *ccpus)
 
 static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_ctx *taskc)
 {
-	struct bpf_cpumask *cpumask;
+	scx_bitmap_t mask;
 	int ret;
 
 	/* We don't need our own mask, we have no placement restrictions. */
@@ -2658,13 +2614,12 @@ static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_c
 	if (ret)
 		return ret;
 
-	if (!(cpumask = bpf_cpumask_create()))
+	mask = scx_bitmap_alloc();
+	if (!mask)
 		return -ENOMEM;
 
-	if ((cpumask = bpf_kptr_xchg(&taskc->layered_unprotected_mask, cpumask))) {
-		bpf_cpumask_release(cpumask);
-		return -EINVAL;
-	}
+	scx_bitmap_clear(mask);
+	taskc->layered_unprotected_mask = mask;
 
 	return 0;
 }
@@ -2709,7 +2664,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx *taskc;
-	struct bpf_cpumask *cpumask;
+	scx_bitmap_t mask;
 	s32 ret;
 
 	/*
@@ -2734,40 +2689,31 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	ret = init_cached_cpus(&taskc->layered_cpus);
 	if (ret)
 		return ret;
-	if (!(cpumask = bpf_cpumask_create()))
+	mask = scx_bitmap_alloc();
+	if (!mask)
 		return -ENOMEM;
-
-	if ((cpumask = bpf_kptr_xchg(&taskc->layered_mask, cpumask))) {
-		/* Should never happen as we just inserted it above. */
-		bpf_cpumask_release(cpumask);
-		return -EINVAL;
-	}
+	scx_bitmap_clear(mask);
+	taskc->layered_mask = mask;
 
 	// LLC setup
 	ret = init_cached_cpus(&taskc->layered_cpus_llc);
 	if (ret)
 		return ret;
-
-	if (!(cpumask = bpf_cpumask_create()))
+	mask = scx_bitmap_alloc();
+	if (!mask)
 		return -ENOMEM;
-
-	if ((cpumask = bpf_kptr_xchg(&taskc->layered_llc_mask, cpumask))) {
-		bpf_cpumask_release(cpumask);
-		return -EINVAL;
-	}
+	scx_bitmap_clear(mask);
+	taskc->layered_llc_mask = mask;
 
 	// Node setup
 	ret = init_cached_cpus(&taskc->layered_cpus_node);
 	if (ret)
 		return ret;
-
-	if (!(cpumask = bpf_cpumask_create()))
+	mask = scx_bitmap_alloc();
+	if (!mask)
 		return -ENOMEM;
-
-	if ((cpumask = bpf_kptr_xchg(&taskc->layered_node_mask, cpumask))) {
-		bpf_cpumask_release(cpumask);
-		return -EINVAL;
-	}
+	scx_bitmap_clear(mask);
+	taskc->layered_node_mask = mask;
 
 	// Unprotected CPU idle mask setup if necessary
 	ret = maybe_init_task_unprotected_mask(p, taskc);
@@ -2864,14 +2810,14 @@ static s64 dsq_first_runnable_at_ms(u64 dsq_id, u64 now)
 	return 0;
 }
 
-__hidden void dump_cpumask_word(s32 word, struct cpumask *cpumask)
+__hidden void dump_cpumask_word(s32 word, scx_bitmap_t cpumask)
 {
 	u32 u, v = 0;
 
 	bpf_for(u, 0, 32) {
 		s32 cpu = 32 * word + u;
 		if (cpu < nr_cpu_ids &&
-		    bpf_cpumask_test_cpu(cpu, cpumask))
+		    scx_bitmap_test_cpu(cpu, cpumask))
 			v |= 1 << u;
 	}
 	scx_bpf_dump("%08x", v);
@@ -2879,7 +2825,7 @@ __hidden void dump_cpumask_word(s32 word, struct cpumask *cpumask)
 
 int dump_layer_cpumask(int id)
 {
-	struct cpumask *layer_cpumask;
+	scx_bitmap_t layer_cpumask;
 	u32 word, nr_words = (nr_cpu_ids + 31) / 32;
 
 	if (!(layer_cpumask = lookup_layer_cpumask(id)))
@@ -2993,17 +2939,23 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 
 		#pragma unroll
 		for (pass = 0; pass < 2; ++pass) bpf_for(cpu, 0, nr_possible_cpus) {
-			const struct cpumask *cpumask;
+			scx_bitmap_t layered_mask;
+			bool use_cpus_ptr = false;
 
-			if (!(cpumask = cast_mask(taskc->layered_mask)))
+			if (!(layered_mask = taskc->layered_mask))
 				goto unlock;
 
 			/* for affinity violating tasks, target all allowed CPUs */
-			if (bpf_cpumask_empty(cpumask))
-				cpumask = p->cpus_ptr;
+			if (scx_bitmap_empty(layered_mask))
+				use_cpus_ptr = true;
 
-			if (!bpf_cpumask_test_cpu(cpu, cpumask))
-				continue;
+			if (use_cpus_ptr) {
+				if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+					continue;
+			} else {
+				if (!scx_bitmap_test_cpu(cpu, layered_mask))
+					continue;
+			}
 
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero_u32, cpu);
 			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero_u32, cpu);
@@ -3080,46 +3032,34 @@ u64 run_timer_cb(int key)
 __weak int
 init_layer_cpumasks(int layer_id)
 {
-	struct bpf_cpumask *cpumask, *cpuset;
-	struct layer_cpumask_wrapper *cpumaskw;
+	scx_bitmap_t cpumask, cpuset;
 
-	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
-		return -ENOENT;
-
-	cpuset = bpf_cpumask_create();
+	cpuset = scx_bitmap_alloc();
 	if (!cpuset)
 		return -ENOMEM;
+	scx_bitmap_clear(cpuset);
+	layers[layer_id].arena_cpuset = (u64)cpuset;
 
-	cpuset = bpf_kptr_xchg(&cpumaskw->cpuset, cpuset);
-	if (cpuset)
-		bpf_cpumask_release(cpuset);
-
-	cpumask = bpf_cpumask_create();
+	cpumask = scx_bitmap_alloc();
 	if (!cpumask)
 		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+	scx_bitmap_clear(cpumask);
+	layers[layer_id].arena_cpumask = (u64)cpumask;
 
 	layer_cpuset_bpfmask(layer_id);
 
-	bpf_rcu_read_lock();
-	/* Look the masks back up to make the verifier happy. */
-	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
-	    !(cpumask = cpumaskw->cpumask) ||
-	    !(cpuset = cpumaskw->cpuset)) {
-		bpf_rcu_read_unlock();
+	/* Re-read the cpuset after deserialization */
+	cpuset = lookup_layer_cpuset(layer_id);
+	cpumask = lookup_layer_cpumask(layer_id);
+	if (!cpuset || !cpumask)
 		return -EINVAL;
-	}
 
 	/*
 	 * Start all layers with their full cpuset so that everything runs
 	 * everywhere. This will soon be updated by refresh_cpumasks()
 	 * once the scheduler starts running.
 	 */
-	bpf_cpumask_copy(cpumask, (const struct cpumask *)cpuset);
-	bpf_rcu_read_unlock();
+	scx_bitmap_copy(cpumask, cpuset);
 
 	return 0;
 }
@@ -3221,9 +3161,9 @@ static s32 init_layer(int layer_id)
  * Initializes per CPU data structures.
  */
 static s32 init_cpu(s32 cpu, int *nr_online_cpus,
-		    struct bpf_cpumask *cpumask,
-		    struct bpf_cpumask *tmp_big_cpumask,
-		    struct bpf_cpumask *tmp_unprotected_cpumask)
+		    scx_bitmap_t cpumask,
+		    scx_bitmap_t tmp_big_cpumask,
+		    scx_bitmap_t tmp_unprotected_cpumask)
 {
 	const volatile u8 *u8_ptr;
 	struct cpu_ctx *cpuc;
@@ -3246,14 +3186,14 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	 * By default, set all CPUs as unprotected, we'll converge eventually in
 	 * refresh_layer_cpuc.
 	 */
-	bpf_cpumask_set_cpu(cpu, tmp_unprotected_cpumask);
+	scx_bitmap_set_cpu(cpu, tmp_unprotected_cpumask);
 
 	if ((u8_ptr = MEMBER_VPTR(all_cpus, [cpu / 8]))) {
 		if (*u8_ptr & (1 << (cpu % 8))) {
-			bpf_cpumask_set_cpu(cpu, cpumask);
+			scx_bitmap_set_cpu(cpu, cpumask);
 			(*nr_online_cpus)++;
 			if (cpuc->is_big)
-				bpf_cpumask_set_cpu(cpu, tmp_big_cpumask);
+				scx_bitmap_set_cpu(cpu, tmp_big_cpumask);
 		}
 	} else {
 		return -EINVAL;
@@ -3301,48 +3241,34 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask;
+	scx_bitmap_t cpumask, tmp_big_cpumask, tmp_unprotected_cpumask;
 	int i, nr_online_cpus, ret;
 
-	cpumask = bpf_cpumask_create();
+	cpumask = scx_bitmap_alloc();
 	if (!cpumask)
 		return -ENOMEM;
+	scx_bitmap_clear(cpumask);
 
-	tmp_big_cpumask = bpf_cpumask_create();
-	if (!tmp_big_cpumask) {
-		bpf_cpumask_release(cpumask);
+	tmp_big_cpumask = scx_bitmap_alloc();
+	if (!tmp_big_cpumask)
 		return -ENOMEM;
-	}
+	scx_bitmap_clear(tmp_big_cpumask);
 
-	tmp_unprotected_cpumask = bpf_cpumask_create();
-	if (!tmp_unprotected_cpumask) {
-		bpf_cpumask_release(tmp_big_cpumask);
-		bpf_cpumask_release(cpumask);
+	tmp_unprotected_cpumask = scx_bitmap_alloc();
+	if (!tmp_unprotected_cpumask)
 		return -ENOMEM;
-	}
+	scx_bitmap_clear(tmp_unprotected_cpumask);
 
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask, tmp_unprotected_cpumask);
-		if (ret != 0) {
-			bpf_cpumask_release(cpumask);
-			bpf_cpumask_release(tmp_big_cpumask);
-			bpf_cpumask_release(tmp_unprotected_cpumask);
+		if (ret != 0)
 			return ret;
-		}
 	}
 
-	cpumask = bpf_kptr_xchg(&all_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
-	if (tmp_big_cpumask)
-		bpf_cpumask_release(tmp_big_cpumask);
-
-	tmp_unprotected_cpumask = bpf_kptr_xchg(&unprotected_cpumask, tmp_unprotected_cpumask);
-	if (tmp_unprotected_cpumask)
-		bpf_cpumask_release(tmp_unprotected_cpumask);
+	all_cpumask = cpumask;
+	big_cpumask = tmp_big_cpumask;
+	unprotected_cpumask = tmp_unprotected_cpumask;
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);

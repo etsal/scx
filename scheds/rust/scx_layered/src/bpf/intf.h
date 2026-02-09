@@ -13,6 +13,15 @@
 #define __kptr
 #endif
 
+#ifndef __BPF__
+#ifndef __arena
+#define __arena
+#endif
+#ifndef __arg_arena
+#define __arg_arena
+#endif
+#endif
+
 #ifndef __KERNEL__
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -218,7 +227,7 @@ struct llc_prox_map {
 
 struct llc_ctx {
 	u32			id;
-	struct bpf_cpumask __kptr *cpumask;
+	u64			cpumask;	/* scx_bitmap_t stored as raw pointer */
 	u32			nr_cpus;
 	u64			vtime_now[MAX_LAYERS];
 	u64			queued_runtime[MAX_LAYERS];
@@ -229,7 +238,7 @@ struct llc_ctx {
 
 struct node_ctx {
 	u32			id;
-	struct bpf_cpumask __kptr *cpumask;
+	u64			cpumask;	/* scx_bitmap_t stored as raw pointer */
 	u32			nr_llcs;
 	u32			nr_cpus;
 	u64			llc_mask;
@@ -302,6 +311,9 @@ struct layer {
 	bool			is_protected;
 	u8			cpuset[MAX_CPUS_U8];
 	u64			member_expire_ms;
+
+	u64			arena_cpumask;	/* scx_bitmap_t for layer cpumask */
+	u64			arena_cpuset;	/* scx_bitmap_t for layer cpuset */
 };
 
 #endif /* __INTF_H */
