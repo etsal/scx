@@ -316,4 +316,44 @@ struct layer {
 	u64			arena_cpuset;	/* scx_bitmap_t for layer cpuset */
 };
 
+struct cached_cpus {
+	s64			id;
+	u64			seq;
+};
+
+/*
+ * Arena bitmap pointers are stored as u64 in this shared header.
+ * In BPF code, cast to scx_bitmap_t via the TASKC_*_MASK macros
+ * defined in main.bpf.c.
+ */
+struct task_ctx {
+	int			pid;
+	int			last_cpu;
+	u32			layer_id;
+	int			last_waker;
+	bool			refresh_layer;
+	struct cached_cpus	layered_cpus;
+	u64			layered_mask;
+	struct cached_cpus	layered_cpus_llc;
+	u64			layered_llc_mask;
+	struct cached_cpus	layered_cpus_node;
+	u64			layered_node_mask;
+	struct cached_cpus	layered_cpus_unprotected;
+	u64			layered_unprotected_mask;
+	u64			cpus_allowed_mask;
+	bool			all_cpuset_allowed;
+	bool			cpus_node_aligned;
+	u64			runnable_at;
+	u64			running_at;
+	u64			runtime_avg;
+	u64			dsq_id;
+	u32			llc_id;
+
+	/* for llcc->queue_runtime */
+	u32			qrt_layer_id;
+	u32			qrt_llc_id;
+
+	u64			recheck_layer_membership;
+};
+
 #endif /* __INTF_H */

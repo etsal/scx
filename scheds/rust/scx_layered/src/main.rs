@@ -2274,7 +2274,8 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the arena library (static allocator, bitmap subsystem,
         // per-CPU storage, per-task allocator, and topology).
-        let arenalib = ArenaLib::init(skel.object_mut(), 0, *NR_CPU_IDS)?;
+        let task_size = std::mem::size_of::<types::task_ctx>();
+        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
         arenalib.setup()?;
 
         // Initialize the arena layers pointer by running the BPF syscall program.
