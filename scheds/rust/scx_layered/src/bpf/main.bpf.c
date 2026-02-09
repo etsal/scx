@@ -511,7 +511,7 @@ struct task_ctx {
 	scx_bitmap_t		layered_node_mask;
 	struct cached_cpus	layered_cpus_unprotected;
 	scx_bitmap_t		layered_unprotected_mask;
-	u8			cpus_allowed[MAX_CPUS_U8];
+	scx_bitmap_t		cpus_allowed_mask;
 	bool			all_cpuset_allowed;
 	bool			cpus_node_aligned;
 	u64			runnable_at;
@@ -536,7 +536,7 @@ struct {
 
 
 static void refresh_cpus_flags(struct task_ctx *taskc,
-			       const struct cpumask *cpumask);
+			       scx_bitmap_t cpumask);
 
 static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 {
@@ -731,30 +731,13 @@ void refresh_cached_cpus_bitmap(scx_bitmap_t mask,
 	ccpus->seq = cpus_seq;
 }
 
-static __always_inline
-void refresh_cached_cpus_and_cpumask(scx_bitmap_t mask,
-			 struct cached_cpus *ccpus,
-			 s64 id, u64 cpus_seq,
-			 scx_bitmap_t cpus_a,
-			 const struct cpumask *cpus_b)
-{
-	if (unlikely(!mask || !cpus_a || !cpus_b)) {
-		scx_bpf_error("NULL ccpus->mask or cpus_a/b");
-		return;
-	}
-
-	scx_bitmap_and_cpumask(mask, cpus_a, cpus_b);
-	ccpus->id = id;
-	ccpus->seq = cpus_seq;
-}
-
 static void maybe_refresh_layered_cpus(struct task_struct *p, struct task_ctx *taskc,
 				       scx_bitmap_t layer_cpumask,
 				       u64 cpus_seq)
 {
 	if (should_refresh_cached_cpus(&taskc->layered_cpus, 0, cpus_seq)) {
-		refresh_cached_cpus_and_cpumask(taskc->layered_mask, &taskc->layered_cpus, 0, cpus_seq,
-				    layer_cpumask, p->cpus_ptr);
+		refresh_cached_cpus_bitmap(taskc->layered_mask, &taskc->layered_cpus, 0, cpus_seq,
+				    layer_cpumask, taskc->cpus_allowed_mask);
 		trace("%s[%d] layered cpumask refreshed to seq=%llu",
 		      p->comm, p->pid, taskc->layered_cpus.seq);
 	}
@@ -808,7 +791,7 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 
 	if (should_refresh_cached_cpus(&taskc->layered_cpus_unprotected, 0, cpus_seq)) {
 		scx_bitmap_or(task_cpumask, unprotected_cpumask, layer_cpumask);
-		scx_bitmap_and_cpumask(task_cpumask, task_cpumask, p->cpus_ptr);
+		scx_bitmap_and(task_cpumask, task_cpumask, taskc->cpus_allowed_mask);
 
 		taskc->layered_cpus_unprotected.id = 0;
 		taskc->layered_cpus_unprotected.seq = cpus_seq;
@@ -1111,7 +1094,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct task_struct *curr;
 	bool cand_idle;
 
-	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
+	if (cand >= nr_possible_cpus || !scx_bitmap_test_cpu(cand, taskc->cpus_allowed_mask))
 		return false;
 
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
@@ -2209,7 +2192,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	}
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
-	refresh_cpus_flags(taskc, p->cpus_ptr);
+	refresh_cpus_flags(taskc, taskc->cpus_allowed_mask);
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
@@ -2557,7 +2540,7 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 }
 
 static void refresh_cpus_flags(struct task_ctx *taskc,
-			       const struct cpumask *cpumask)
+			       scx_bitmap_t cpumask)
 {
 	scx_bitmap_t cpuset;
 	u32 node_id;
@@ -2568,7 +2551,7 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 		return;
 	}
 
-	taskc->all_cpuset_allowed = scx_bitmap_subset_cpumask(cpuset, cpumask);
+	taskc->all_cpuset_allowed = scx_bitmap_subset(cpuset, cpumask);
 	taskc->cpus_node_aligned = true;
 
 	bpf_for(node_id, 0, nr_nodes) {
@@ -2582,8 +2565,8 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			return;
 
 		/* not llc aligned if partially overlaps */
-		if (scx_bitmap_intersects_cpumask(node_cpumask, cpumask) &&
-		    !scx_bitmap_subset_cpumask(node_cpumask, cpumask)) {
+		if (scx_bitmap_intersects(node_cpumask, cpumask) &&
+		    !scx_bitmap_subset(node_cpumask, cpumask)) {
 			taskc->cpus_node_aligned = false;
 			break;
 		}
@@ -2603,7 +2586,7 @@ static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_c
 	int ret;
 
 	/* We don't need our own mask, we have no placement restrictions. */
-	if (bpf_cpumask_full(p->cpus_ptr))
+	if (p->nr_cpus_allowed >= nr_possible_cpus)
 		return 0;
 
 	/* Already initialized. */
@@ -2632,6 +2615,10 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
+	/* Update the arena copy of cpus_ptr */
+	if (taskc->cpus_allowed_mask)
+		scx_bitmap_from_bpf(taskc->cpus_allowed_mask, cpumask);
+
 	/*
 	 * If the task does not belong to a layer, it has not been
 	 * matched to one yet. We need to know which layer the task
@@ -2639,7 +2626,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	 * the call until we match.
 	 */
 	if (taskc->layer_id != MAX_LAYERS)
-		refresh_cpus_flags(taskc, cpumask);
+		refresh_cpus_flags(taskc, taskc->cpus_allowed_mask);
 
 	/* invalidate all cached cpumasks */
 	taskc->layered_cpus.seq = -1;
@@ -2714,6 +2701,13 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		return -ENOMEM;
 	scx_bitmap_clear(mask);
 	taskc->layered_node_mask = mask;
+
+	// cpus_allowed arena copy of p->cpus_ptr
+	mask = scx_bitmap_alloc();
+	if (!mask)
+		return -ENOMEM;
+	scx_bitmap_from_bpf(mask, p->cpus_ptr);
+	taskc->cpus_allowed_mask = mask;
 
 	// Unprotected CPU idle mask setup if necessary
 	ret = maybe_init_task_unprotected_mask(p, taskc);
@@ -2939,23 +2933,18 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 
 		#pragma unroll
 		for (pass = 0; pass < 2; ++pass) bpf_for(cpu, 0, nr_possible_cpus) {
-			scx_bitmap_t layered_mask;
-			bool use_cpus_ptr = false;
+			scx_bitmap_t cpumask;
 
-			if (!(layered_mask = taskc->layered_mask))
+			cpumask = taskc->layered_mask;
+			if (!cpumask)
 				goto unlock;
 
 			/* for affinity violating tasks, target all allowed CPUs */
-			if (scx_bitmap_empty(layered_mask))
-				use_cpus_ptr = true;
+			if (scx_bitmap_empty(cpumask))
+				cpumask = taskc->cpus_allowed_mask;
 
-			if (use_cpus_ptr) {
-				if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-					continue;
-			} else {
-				if (!scx_bitmap_test_cpu(cpu, layered_mask))
-					continue;
-			}
+			if (!cpumask || !scx_bitmap_test_cpu(cpu, cpumask))
+				continue;
 
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero_u32, cpu);
 			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero_u32, cpu);
