@@ -1,6 +1,7 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 
 #include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
 #include <scx/namespace_impl.bpf.h>
 
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include <lib/arena_map.h>
 #include <lib/pmu.h>
 
 #include "intf.h"
@@ -67,12 +69,16 @@ const volatile char hi_fb_thread_name[16];
 const volatile u64 ext_sched_class_addr = 0;
 const volatile u64 idle_sched_class_addr = 0;
 
+typedef struct layer __arena layer;
+typedef struct layer_match __arena layer_match;
+typedef struct layer_match_ands __arena layer_match_ands;
+
 private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
 u64 unprotected_seq = 0;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
-struct layer layers[MAX_LAYERS];
+struct layer __arena layers[MAX_LAYERS];
 u32 fallback_cpu;
 u32 layered_root_tgid = 0;
 
@@ -96,7 +102,7 @@ static inline bool is_percpu_kthread_preempting(struct task_struct *p)
 		(percpu_kthread_preempt_all || p->scx.weight > 100);
 }
 
-static __always_inline struct layer *lookup_layer(u32 id)
+static __always_inline layer *lookup_layer(u32 id)
 {
 	if (id >= nr_layers) {
 		scx_bpf_error("invalid layer %d", id);
@@ -176,7 +182,7 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
-static bool cpuc_in_layer(struct cpu_ctx *cpuc, struct layer *layer)
+static bool cpuc_in_layer(struct cpu_ctx *cpuc, layer *layer)
 {
 	if (layer->kind == LAYER_KIND_OPEN)
 		return cpuc->in_open_layers;
@@ -273,7 +279,7 @@ static void gstat_inc(u32 id, struct cpu_ctx *cpuc)
 	gstat_add(id, cpuc, 1);
 }
 
-static void lstat_add(u32 id, struct layer *layer, struct cpu_ctx *cpuc, s64 delta)
+static void lstat_add(u32 id, layer *layer, struct cpu_ctx *cpuc, s64 delta)
 {
 	u64 *vptr;
 
@@ -283,7 +289,7 @@ static void lstat_add(u32 id, struct layer *layer, struct cpu_ctx *cpuc, s64 del
 		scx_bpf_error("invalid layer or stat ids: %d, %d", id, layer->id);
 }
 
-static void lstat_inc(u32 id, struct layer *layer, struct cpu_ctx *cpuc)
+static void lstat_inc(u32 id, layer *layer, struct cpu_ctx *cpuc)
 {
 	lstat_add(id, layer, cpuc, 1);
 }
@@ -325,17 +331,17 @@ static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
 	}
 }
 
-static void layer_llc_drain_enable(struct layer *layer, u32 llc_id)
+static void layer_llc_drain_enable(layer *layer, u32 llc_id)
 {
 	__sync_or_and_fetch(&layer->llcs_to_drain, 1LLU << llc_id);
 }
 
-static void layer_llc_drain_disable(struct layer *layer, u32 llc_id)
+static void layer_llc_drain_disable(layer *layer, u32 llc_id)
 {
 	__sync_and_and_fetch(&layer->llcs_to_drain, ~(1LLU << llc_id));
 }
 
-static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
+static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, layer *layer)
 {
 	/* a CPU can be shared by multiple open layers */
 	cpuc->in_open_layers = (layer->kind == LAYER_KIND_OPEN);
@@ -366,12 +372,12 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 static void layer_cpuset_bpfmask(int layer_id)
 {
 	struct bpf_cpumask *layer_cpuset;
-	u8 *u8_ptr;
+	u8 __arena *u8_ptr;
 	int cpu;
 
 	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_possible_cpus) {
-		u8_ptr = MEMBER_VPTR(layers, [layer_id].cpuset[cpu / 8]);
+		u8_ptr = &layers[layer_id].cpuset[cpu / 8];
 		if (!u8_ptr) {
 			bpf_rcu_read_unlock();
 			scx_bpf_error("could not find cpuset byte");
@@ -402,11 +408,11 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	bool protected_changed = false;
-	struct layer *layer;
+	layer *layer;
 	struct cpu_ctx *cpuc;
 	int cpu, llc_id;
 
-	layer = MEMBER_VPTR(layers, [layer_id]);
+	layer = &layers[layer_id];
 	if (!layer) {
 		scx_bpf_error("can't happen");
 		return 0;
@@ -424,14 +430,14 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	}
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
-		u8 *u8_ptr;
+		u8 __arena *u8_ptr;
 
 		if (!(cpuc = lookup_cpu_ctx(cpu))) {
 			bpf_rcu_read_unlock();
 			return 0;
 		}
 
-		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
+		if ((u8_ptr = &layers[layer_id].cpus[cpu / 8])) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
 				protected_changed = refresh_layer_cpuc(cpuc, layer) || protected_changed;
 
@@ -827,7 +833,7 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_smtmask, const struct layer *layer)
+			      const struct cpumask *idle_smtmask, const layer *layer)
 {
 	bool prev_in_cand;
 	s32 cpu = -1;
@@ -867,7 +873,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 }
 
 static __always_inline
-bool should_try_preempt_first(s32 cand, struct layer *layer,
+bool should_try_preempt_first(s32 cand, layer *layer,
 			      const struct cpumask *layered_cpumask)
 {
 	struct cpu_ctx *cand_cpuc;
@@ -887,7 +893,7 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 
 static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
-		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
+		  struct cpu_ctx *cpuc, struct task_ctx *taskc, layer *layer,
 		  bool from_selcpu)
 {
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
@@ -1068,7 +1074,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct layer *layer;
+	layer *layer;
 	s32 cpu;
 
 	maybe_refresh_layer_cpumasks();
@@ -1107,7 +1113,7 @@ enum preempt_flags {
  * before use and ignore extra enq_flags.
  */
 static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *taskc,
-			    struct layer *layer, u64 flags)
+			    layer *layer, u64 flags)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc;
 	struct task_struct *curr;
@@ -1196,7 +1202,7 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 	taskc->qrt_llc_id = MAX_LLCS;
 }
 
-static void layer_kick_idle_cpu(struct layer *layer)
+static void layer_kick_idle_cpu(layer *layer)
 {
 	const struct cpumask *layer_cpumask, *idle_smtmask;;
 	s32 cpu;
@@ -1216,7 +1222,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct cpu_ctx *cpuc, *task_cpuc;
 	struct task_ctx *taskc;
 	struct llc_ctx *llcc;
-	struct layer *layer;
+	layer *layer;
 	bool wakeup = enq_flags & SCX_ENQ_WAKEUP;
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 	u32 llc_id, layer_id;
@@ -1545,7 +1551,7 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 }
 
 static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
-			 struct task_ctx *taskc, struct layer *layer)
+			 struct task_ctx *taskc, layer *layer)
 {
 	if (cpuc->yielding || !max_exec_ns)
 		goto no;
@@ -1725,7 +1731,7 @@ reset:
 	return consumed;
 }
 
-static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
+static bool try_drain_layer_llcs(layer *layer, struct cpu_ctx *cpuc)
 {
 	u32 cnt = layer->llc_drain_cnt++;
 	u32 u;
@@ -1739,7 +1745,7 @@ static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 	bpf_for(u, 0, nr_llcs) {
 		u32 llc_id = (u + cnt / 2) % nr_llcs;
 		u64 dsq_id = layer_dsq_id(layer->id, llc_id);
-		u32 *vptr;
+		u32 __arena *vptr;
 		bool disabled = false, consumed;
 
 		if (!(layer->llcs_to_drain & (1LLU << llc_id)))
@@ -1789,7 +1795,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 					      struct llc_ctx *llcc)
 {
 	struct llc_prox_map *llc_pmap = &llcc->prox_map;
-	struct layer *layer;
+	layer *layer;
 	u32 nid = llc_node_id(llcc->id);
 	bool skip_remote_node;
 	u32 u;
@@ -1860,7 +1866,7 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_ctx *prev_taskc = NULL;
-	struct layer *prev_layer = NULL;
+	layer *prev_layer = NULL;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcc;
 	bool tried_preempting = false, tried_lo_fb = false;
@@ -1976,7 +1982,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		/*
 		 * CPU is in a grouped or confined layer or not assigned.
 		 */
-		struct layer *owner_layer = NULL;
+		layer *owner_layer = NULL;
 
 		if (cpuc->layer_id < MAX_LAYERS)
 			owner_layer = &layers[cpuc->layer_id];
@@ -2041,7 +2047,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	account_used(p, cpuc, taskc, scx_bpf_now());
 }
 
-static __noinline bool match_one(struct layer *layer, struct layer_match *match, struct task_ctx *taskc,
+static __noinline bool match_one(layer *layer, layer_match *match, struct task_ctx *taskc,
 				 struct task_struct *p, const char *cgrp_path)
 {
 	switch (match->kind) {
@@ -2109,7 +2115,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 		struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
 	bool matched_gpu = false;
-	struct layer *layer;
+	layer *layer;
 	u32 nr_match_ors, pid;
 	u64 or_id, and_id;
 
@@ -2123,7 +2129,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 		return -EINVAL;
 
 	bpf_for(or_id, 0, nr_match_ors) {
-		struct layer_match_ands *ands;
+		layer_match_ands *ands;
 		bool matched = true;
 
 		barrier_var(or_id);
@@ -2137,7 +2143,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 
 		matched_gpu = false;
 		bpf_for(and_id, 0, ands->nr_match_ands) {
-			struct layer_match *match;
+			layer_match *match;
 
 			barrier_var(and_id);
 			if (and_id >= NR_LAYER_MATCH_KINDS)
@@ -2180,7 +2186,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 {
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcc;
-	struct layer *layer;
+	layer *layer;
 
 	/* Drop membership from older layer. */
 	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
@@ -2394,7 +2400,7 @@ static __always_inline
 void on_wakeup(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct cpu_ctx *cpuc;
-	struct layer *layer;
+	layer *layer;
 	struct task_ctx *waker_taskc;
 	struct task_struct *waker;
 
@@ -2438,7 +2444,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	s32 preempting_pid;
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct layer *layer;
+	layer *layer;
 	struct node_ctx *nodec;
 	struct llc_ctx *llcc;
 	s32 task_cpu = scx_bpf_task_cpu(p);
@@ -2508,7 +2514,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct layer *task_layer;
+	layer *task_layer;
 	u64 now = scx_bpf_now();
 	s32 task_lid;
 	u64 runtime;
@@ -2557,7 +2563,7 @@ bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct 
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct layer *layer;
+	layer *layer;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(from)) ||
 	    !(layer = lookup_layer(taskc->layer_id)))
@@ -2888,7 +2894,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	u64 now = scx_bpf_now();
 	u64 dsq_id;
 	int i, j;
-	struct layer *layer;
+	layer *layer;
 
 	scx_bpf_dump_header();
 
@@ -3118,7 +3124,7 @@ init_layer_cpumasks(int layer_id)
  */
 static s32 init_layer(int layer_id)
 {
-	struct layer *layer = &layers[layer_id];
+	layer *layer = &layers[layer_id];
 	int i, j, ret;
 
 	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d protected=%d",
@@ -3134,7 +3140,7 @@ static s32 init_layer(int layer_id)
 	}
 
 	bpf_for(i, 0, layer->nr_match_ors) {
-		struct layer_match_ands *ands = MEMBER_VPTR(layers, [layer_id].matches[i]);
+		layer_match_ands *ands = &layers[layer_id].matches[i];
 		if (!ands) {
 			scx_bpf_error("shouldn't happen");
 			return -EINVAL;
@@ -3150,12 +3156,12 @@ static s32 init_layer(int layer_id)
 		bpf_for(j, 0, ands->nr_match_ands) {
 			char header[32];
 			u64 header_data[1] = { j };
-			struct layer_match *match;
+			layer_match *match;
 
 			bpf_snprintf(header, sizeof(header), "CFG     AND[%02d]:",
 				     header_data, sizeof(header_data));
 
-			match = MEMBER_VPTR(layers, [layer_id].matches[i].matches[j]);
+			match = &layers[layer_id].matches[i].matches[j];
 			if (!match) {
 				scx_bpf_error("shouldn't happen");
 				return -EINVAL;

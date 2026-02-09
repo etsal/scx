@@ -965,8 +965,7 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
         let nr_layer_tasks: Vec<usize> = skel
-            .maps
-            .bss_data
+            .arena
             .as_ref()
             .unwrap()
             .layers
@@ -976,7 +975,7 @@ impl Stats {
             .collect();
         let layer_slice_us: Vec<u64> = skel
             .maps
-            .bss_data
+            .arena
             .as_ref()
             .unwrap()
             .layers

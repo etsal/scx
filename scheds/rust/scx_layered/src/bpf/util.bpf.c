@@ -23,13 +23,6 @@ struct {
 	__uint(key_size, sizeof(u32));
 	__uint(value_size, MAX_PATH);
 	__uint(max_entries, 1);
-} match_bufs SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, MAX_PATH);
-	__uint(max_entries, 1);
 } str_bufs SEC(".maps");
 
 __hidden char *format_cgrp_path(struct cgroup *cgrp)
@@ -83,10 +76,9 @@ __hidden __noinline int clamp_pathind(int i)
 	return i > 0 ? i % MAX_PATH : 0;
 }
 
-bool __noinline match_prefix(const char *prefix, const char *str)
+bool __noinline match_prefix(const char __arg_arena __arena *prefix, const char *str)
 {
 	u32 c, zero = 0;
-	int str_len, prefix_len;
 
 	if (!prefix || !str) {
 		scx_bpf_error("invalid args: %s %s",
@@ -94,33 +86,26 @@ bool __noinline match_prefix(const char *prefix, const char *str)
 		return false;
 	}
 
-	char *match_buf = bpf_map_lookup_elem(&match_bufs, &zero);
 	char *str_buf = bpf_map_lookup_elem(&str_bufs, &zero);
-	if (!match_buf || !str_buf) {
-		scx_bpf_error("failed to look up buf");
+	if (!str_buf) {
+		scx_bpf_error("could not retrieve str buf");
 		return false;
 	}
 
-	prefix_len = bpf_probe_read_kernel_str(match_buf, MAX_PATH, prefix);
-	if (prefix_len < 0) {
-		scx_bpf_error("failed to read prefix");
+	if (bpf_probe_read_kernel_str(&str_buf, MAX_PATH, str) < 0) {
+		scx_bpf_error("could not read kernel str");
 		return false;
-	}
-
-	str_len = bpf_probe_read_kernel_str(str_buf, MAX_PATH, str);
-	if (str_len < 0) {
-		scx_bpf_error("failed to read str");
-		return false;
-	}
-
-	if (prefix_len > str_len)
-		return false;
+	};
 
 	bpf_for(c, 0, MAX_PATH) {
-		if (match_buf[clamp_pathind(c)] == '\0')
+		if (prefix[c] == '\0')
 			return true;
 
-		if (str_buf[clamp_pathind(c)] != match_buf[clamp_pathind(c)])
+		/* Implies prefix_len > str_len. */
+		if (str_buf[clamp_pathind(c)] == '\0')
+			return false;
+
+		if (str_buf[clamp_pathind(c)] != prefix[c])
 			return false;
 	}
 	return false;
