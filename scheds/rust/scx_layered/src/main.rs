@@ -700,20 +700,31 @@ fn llcmask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
     mask
 }
 
-fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
-    let mut cpu_ctxs = vec![];
-    let cpu_ctxs_vec = skel
-        .maps
-        .cpu_ctxs
-        .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-        .context("Failed to lookup cpu_ctx")?
-        .unwrap();
-    for cpu in 0..*NR_CPUS_POSSIBLE {
-        cpu_ctxs.push(*unsafe {
-            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-        });
+/// Get a slice of arena-resident cpu_ctxs via the BSS cpu_ctxs_ptr.
+fn bpf_cpu_ctxs<'a>(skel: &'a BpfSkel<'a>) -> &'a [bpf_intf::cpu_ctx] {
+    let ptr = skel.maps.bss_data.as_ref().unwrap().cpu_ctxs_ptr;
+    unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::with_exposed_provenance::<bpf_intf::cpu_ctx>(ptr as usize),
+            bpf_intf::consts_MAX_CPUS as usize,
+        )
     }
-    Ok(cpu_ctxs)
+}
+
+/// Get a mutable slice of arena-resident cpu_ctxs via the BSS cpu_ctxs_ptr.
+fn bpf_cpu_ctxs_mut<'a>(skel: &'a BpfSkel<'a>) -> &'a mut [bpf_intf::cpu_ctx] {
+    let ptr = skel.maps.bss_data.as_ref().unwrap().cpu_ctxs_ptr;
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            std::ptr::with_exposed_provenance_mut::<bpf_intf::cpu_ctx>(ptr as usize),
+            bpf_intf::consts_MAX_CPUS as usize,
+        )
+    }
+}
+
+fn read_cpu_ctxs(skel: &BpfSkel) -> Vec<bpf_intf::cpu_ctx> {
+    let arena_ctxs = bpf_cpu_ctxs(skel);
+    arena_ctxs[..*NR_CPUS_POSSIBLE].to_vec()
 }
 
 /// Get a mutable slice of arena-resident BPF layers via the BSS layers_ptr.
@@ -926,7 +937,7 @@ impl Stats {
         gpu_task_affinitizer: &GpuTaskAffinitizer,
     ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
-        let cpu_ctxs = read_cpu_ctxs(skel)?;
+        let cpu_ctxs = read_cpu_ctxs(skel);
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
         let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
@@ -975,7 +986,7 @@ impl Stats {
     ) -> Result<()> {
         let elapsed = now.duration_since(self.at);
         let elapsed_f64 = elapsed.as_secs_f64();
-        let cpu_ctxs = read_cpu_ctxs(skel)?;
+        let cpu_ctxs = read_cpu_ctxs(skel);
 
         let layers = bpf_layers(skel);
         let nr_layer_tasks: Vec<usize> = layers
@@ -1837,30 +1848,8 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
-        cpu_ctxs
-            .into_iter()
-            .map(|cpu_ctx| {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
-                        std::mem::size_of::<bpf_intf::cpu_ctx>(),
-                    )
-                };
-                bytes.to_vec()
-            })
-            .collect()
-    }
-
     fn init_cpus(skel: &BpfSkel, layer_specs: &[LayerSpec], topo: &Topology) -> Result<()> {
-        let key = (0_u32).to_ne_bytes();
-        let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
-        let cpu_ctxs_vec = skel
-            .maps
-            .cpu_ctxs
-            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
-            .context("Failed to lookup cpu_ctx")?
-            .unwrap();
+        let cpu_ctxs = bpf_cpu_ctxs_mut(skel);
 
         let op_layers: Vec<u32> = layer_specs
             .iter()
@@ -1901,10 +1890,6 @@ impl<'a> Scheduler<'a> {
 
         // FIXME - this incorrectly assumes all possible CPUs are consecutive.
         for cpu in 0..*NR_CPUS_POSSIBLE {
-            cpu_ctxs.push(*unsafe {
-                &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-            });
-
             let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
             let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
             cpu_ctxs[cpu].cpu = cpu as i32;
@@ -1950,16 +1935,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        Self::init_cpu_prox_map(topo, &mut cpu_ctxs);
-
-        skel.maps
-            .cpu_ctxs
-            .update_percpu(
-                &key,
-                &Self::convert_cpu_ctxs(cpu_ctxs),
-                libbpf_rs::MapFlags::ANY,
-            )
-            .context("Failed to update cpu_ctx")?;
+        Self::init_cpu_prox_map(topo, cpu_ctxs);
 
         Ok(())
     }
