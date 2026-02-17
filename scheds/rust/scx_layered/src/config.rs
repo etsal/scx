@@ -149,6 +149,8 @@ pub struct LayerCommon {
     pub placement: LayerPlacement,
     #[serde(default)]
     pub member_expire_ms: u64,
+    #[serde(default)]
+    pub irq_disabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -157,6 +157,7 @@ lazy_static! {
                         llcs: vec![],
                         member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
+                        irq_disabled: false,
                     },
                 },
             },
@@ -193,6 +194,7 @@ lazy_static! {
                         llcs: vec![],
                         member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
+                        irq_disabled: false,
                     },
                 },
             },
@@ -234,6 +236,7 @@ lazy_static! {
                         llcs: vec![],
                         member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
+                        irq_disabled: false,
                     },
                 },
             },
@@ -273,6 +276,7 @@ lazy_static! {
                         llcs: vec![],
                         member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
+                        irq_disabled: false,
                     },
                 },
             },
@@ -1732,6 +1736,8 @@ struct Scheduler<'a> {
 
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
+    saved_irq_affinities: BTreeMap<i32, Cpumask>,
+    last_irq_mask: Option<Cpumask>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     gpu_task_handler: GpuTaskAffinitizer,
 }
@@ -2380,6 +2386,31 @@ impl<'a> Scheduler<'a> {
             BTreeMap::new()
         };
 
+        let saved_irq_affinities = if layer_specs
+            .iter()
+            .any(|s| s.kind.common().irq_disabled)
+        {
+            let mut affinities = BTreeMap::new();
+            if let Ok(entries) = fs::read_dir("/proc/irq") {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if let Ok(irq) = name.parse::<i32>() {
+                        if let Ok(cpumask) = read_irq_affinity(irq) {
+                            affinities.insert(irq, cpumask);
+                        }
+                    }
+                }
+            }
+            info!("Saved IRQ affinities for {} IRQs", affinities.len());
+            affinities
+        } else {
+            BTreeMap::new()
+        };
+
         if !disable_topology {
             if topo.nodes.len() == 1 && topo.nodes[&0].llcs.len() == 1 {
                 disable_topology = true;
@@ -2736,6 +2767,8 @@ impl<'a> Scheduler<'a> {
 
             topo,
             netdevs,
+            saved_irq_affinities,
+            last_irq_mask: None,
             stats_server,
             gpu_task_handler,
         };
@@ -2801,6 +2834,35 @@ impl<'a> Scheduler<'a> {
             netdev.apply_cpumasks()?;
         }
 
+        Ok(())
+    }
+
+    fn update_irq_cpumasks(&mut self) -> Result<()> {
+        if self.saved_irq_affinities.is_empty() {
+            return Ok(());
+        }
+
+        let mut allowed_cpus = Cpumask::new();
+        for (idx, layer) in self.layers.iter().enumerate() {
+            if !self.layer_specs[idx].kind.common().irq_disabled {
+                allowed_cpus |= &layer.cpus;
+            }
+        }
+
+        if allowed_cpus.is_empty() {
+            warn!("All layers have irq_disabled set, skipping IRQ affinitization");
+            return Ok(());
+        }
+
+        if self.last_irq_mask.as_ref() == Some(&allowed_cpus) {
+            return Ok(());
+        }
+
+        for (&irq, _) in self.saved_irq_affinities.iter() {
+            let _ = write_irq_affinity(irq, &allowed_cpus);
+        }
+
+        self.last_irq_mask = Some(allowed_cpus);
         Ok(())
     }
 
@@ -3473,6 +3535,7 @@ impl<'a> Scheduler<'a> {
         }
 
         let _ = self.update_netdev_cpumasks();
+        let _ = self.update_irq_cpumasks();
         Ok(())
     }
 
@@ -3902,6 +3965,13 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
+        if !self.saved_irq_affinities.is_empty() {
+            info!("Restoring IRQ affinities for {} IRQs", self.saved_irq_affinities.len());
+            for (&irq, cpumask) in self.saved_irq_affinities.iter() {
+                let _ = write_irq_affinity(irq, cpumask);
+            }
+        }
+
         info!("Unregister {SCHEDULER_NAME} scheduler");
 
         if let Some(struct_ops) = self.struct_ops.take() {
@@ -4288,6 +4358,34 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     skel.maps.rodata_data.as_mut().unwrap().membw_event = config;
 
     Ok(config)
+}
+
+fn read_irq_affinity(irq: i32) -> Result<Cpumask> {
+    let path = format!("/proc/irq/{}/smp_affinity_list", irq);
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path))?;
+    let mut cpumask = Cpumask::new();
+    for part in content.trim().split(',') {
+        if let Some((start, end)) = part.split_once('-') {
+            let start: usize = start.parse()?;
+            let end: usize = end.parse()?;
+            for cpu in start..=end {
+                cpumask.set_cpu(cpu)?;
+            }
+        } else if let Ok(cpu) = part.parse::<usize>() {
+            cpumask.set_cpu(cpu)?;
+        }
+    }
+    Ok(cpumask)
+}
+
+fn write_irq_affinity(irq: i32, cpus: &Cpumask) -> Result<()> {
+    let path = format!("/proc/irq/{}/smp_affinity_list", irq);
+    let cpu_list = cpus.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
+    fs::write(&path, &cpu_list)
+        .with_context(|| format!("Failed to write to {}", path))?;
+
+    Ok(())
 }
 
 #[clap_main::clap_main]
