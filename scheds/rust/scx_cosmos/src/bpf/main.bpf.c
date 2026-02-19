@@ -8,152 +8,10 @@
 #include <lib/sdt_task.h>
 
 #include "intf.h"
+#include "params.h"
+#include "cosmos.h"
 
 char _license[] SEC("license") = "GPL";
-
-/*
- * Maximum amount of CPUs supported by the scheduler when flat or preferred
- * idle CPU scan is enabled.
- */
-#define MAX_CPUS	1024
-
-/*
- * Maximum amount of NUMA nodes supported by the scheduler.
- */
-#define MAX_NODES	1024
-
-/*
- * Maximum amount of GPUs supported by the scheduler.
- */
-#define MAX_GPUS	32
-
-/*
- * Shared DSQ used to schedule tasks in deadline mode when the system is
- * saturated.
- *
- * When system is not saturated tasks will be dispatched to the local DSQ
- * in round-robin mode.
- */
-#define SHARED_DSQ		0
-
-/*
- * Thresholds for applying hysteresis to CPU performance scaling:
- *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
- *  - CPUFREQ_HIGH_THRESH: above this level, raise performance to maximum
- *
- * Values between the two thresholds retain the current smoothed performance level.
- */
-#define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
-#define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
-
-/*
- * Subset of CPUs to prioritize.
- */
-private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
-
-/*
- * Set to true when @primary_cpumask is empty (primary domain includes all
- * the CPU).
- */
-const volatile bool primary_all = true;
-
-/*
- * Enable flat iteration to find idle CPUs (fast but inaccurate).
- */
-const volatile bool flat_idle_scan = false;
-
-/*
- * CPUs in the system have SMT is enabled.
- */
-const volatile bool smt_enabled = true;
-
-/*
- * Enable preferred cores prioritization.
- */
-const volatile bool preferred_idle_scan = false;
-
-/*
- * CPUs sorted by their capacity in descendent order.
- */
-const volatile u64 preferred_cpus[MAX_CPUS];
-
-/*
- * Cache CPU capacity values.
- */
-const volatile u64 cpu_capacity[MAX_CPUS];
-
-/*
- * Enable cpufreq integration.
- */
-const volatile bool cpufreq_enabled = true;
-
-/*
- * Enable NUMA optimizations.
- */
-const volatile bool numa_enabled;
-
-/*
- * Aggressively try to avoid SMT contention.
- *
- * Default to true here, so veristat takes the more complicated path.
- */
-const volatile bool avoid_smt = true;
-
-/*
- * Enable address space affinity.
- */
-const volatile bool mm_affinity;
-
-/*
- * Enable perf-event scheduling.
- */
-const volatile bool perf_enabled;
-
-/*
- * Performance counter threshold to classify a task as event heavy.
- */
-const volatile u64 perf_threshold;
-
-/*
- * Enable deferred wakeup.
- */
-const volatile bool deferred_wakeups = true;
-
-/*
- * Do we want to keep the tasks sticky or distribute them on being event
- * heavy
- */
-const volatile bool perf_sticky;
-
-/*
- * Ignore synchronous wakeup events.
- */
-const volatile bool no_wake_sync;
-
-/*
- * Default time slice.
- */
-const volatile u64 slice_ns = 10000ULL;
-
-/*
- * Maximum runtime that can be charged to a task.
- */
-const volatile u64 slice_lag = 20000000ULL;
-
-/*
- * User CPU utilization threshold to determine when the system is busy.
- */
-const volatile u64 busy_threshold;
-
-/*
- * Current global CPU utilization percentage in the range [0 .. 1024].
- */
-volatile u64 cpu_util;
-
-/*
- * Scheduler statistics.
- */
-volatile u64 nr_event_dispatches;
 
 /*
  * Scheduler's exit status.
@@ -161,21 +19,14 @@ volatile u64 nr_event_dispatches;
 UEI_DEFINE(uei);
 
 /*
- * Maximum amount of cpus supported by the system.
+ * Subset of CPUs to prioritize.
  */
-const volatile u32 nr_cpu_ids __weak;
-
-/*
- * Maximum possible NUMA node number.
- */
-const volatile u32 nr_node_ids;
+private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
  * Current system vruntime.
  */
 static u64 vtime_now;
-
-typedef struct task_ctx __arena task_ctx;
 
 /*
  * CPU -> NUMA node mapping.
@@ -201,16 +52,6 @@ static int cpu_node(s32 cpu)
 	return *id;
 }
 
-/*
- * Per-CPU context.
- */
-struct cpu_ctx {
-	u64 last_update;
-	u64 perf_lvl;
-	u64 perf_events;
-	struct bpf_cpumask __kptr *smt;
-};
-
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -221,79 +62,11 @@ struct {
 /*
  * Return a CPU context.
  */
+__weak __hidden
 struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
-}
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(int));
-	__uint(max_entries, MAX_CPUS);
-} perf_events SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(struct bpf_perf_event_value));
-	__uint(max_entries, 1);
-} start_readings SEC(".maps");
-
-static int read_perf_counter(s32 cpu, u32 counter_idx, struct bpf_perf_event_value *value)
-{
-	u32 key = cpu + counter_idx;
-
-	return bpf_perf_event_read_value(&perf_events, key, value, sizeof(*value));
-}
-
-static void start_counters(s32 cpu)
-{
-	struct bpf_perf_event_value value;
-	struct bpf_perf_event_value *ptr;
-	u32 i;
-
-	i = 0;
-	ptr = bpf_map_lookup_elem(&start_readings, &i);
-	if (ptr) {
-		if (read_perf_counter(cpu, i, &value) == 0)
-			*ptr = value;
-		else
-			__builtin_memset(ptr, 0, sizeof(*ptr));
-	}
-}
-
-static void stop_counters(struct task_struct *p, task_ctx *tctx, s32 cpu)
-{
-	struct bpf_perf_event_value current, *start;
-	struct cpu_ctx *cctx;
-	u64 delta_events = 0, delta = 0;
-	u32 i = 0;
-
-	start = bpf_map_lookup_elem(&start_readings, &i);
-	if (start && start->counter != 0) {
-		if (read_perf_counter(cpu, i, &current) == 0) {
-			if (current.counter >= start->counter)
-				delta = current.counter - start->counter;
-			delta_events = delta;
-		}
-	}
-
-	tctx->perf_events = delta_events;
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return;
-	cctx->perf_events += delta;
-
-}
-
-/*
- * Return true if the task is triggering too many PMU events.
- */
-static inline bool is_event_heavy(const task_ctx *tctx)
-{
-	return tctx->perf_events > perf_threshold;
 }
 
 /*
@@ -385,23 +158,6 @@ static void update_cpufreq(s32 cpu)
 }
 
 /*
- * Timer used to defer idle CPU wakeups.
- *
- * Instead of triggering wake-up events directly from hot paths, such as
- * ops.enqueue(), idle CPUs are kicked using the wake-up timer.
- */
-struct wakeup_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct wakeup_timer);
-} wakeup_timer SEC(".maps");
-
-/*
  * Return the global system shared DSQ.
  */
 static inline u64 shared_dsq(s32 cpu)
@@ -432,7 +188,8 @@ static inline bool is_system_busy(void)
 /*
  * Return true if the CPU is running the idle thread, false otherwise.
  */
-static inline bool is_cpu_idle(s32 cpu)
+__weak
+bool is_cpu_idle(s32 cpu)
 {
 	struct task_struct *p;
 	bool idle;
@@ -854,38 +611,6 @@ int enable_primary_cpu(struct cpu_arg *input)
 }
 
 /*
- * Kick idle CPUs with pending tasks.
- *
- * Instead of waking up CPU when tasks are enqueued, we defer the wakeup
- * using this timer handler, in order to have a faster enqueue hot path.
- */
-static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
-{
-	s32 cpu;
-	int err;
-
-	/*
-	 * Iterate over all CPUs and wake up those that have pending tasks
-	 * in their local DSQ.
-	 *
-	 * Note that tasks are only enqueued in ops.enqueue(), but we never
-	 * wake-up the CPUs from there to reduce overhead in the hot path.
-         */
-	bpf_for(cpu, 0, nr_cpu_ids)
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) && is_cpu_idle(cpu))
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	/*
-	 * Re-arm the wakeup timer.
-	 */
-	err = bpf_timer_start(timer, slice_ns, 0);
-	if (err)
-		scx_bpf_error("Failed to re-arm wakeup timer");
-
-	return 0;
-}
-
-/*
  * Return true if the task should attempt a migration, false otherwise.
  */
 static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
@@ -1217,8 +942,6 @@ void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
-	struct bpf_timer *timer;
-	u32 key = 0;
 	int err;
 	int cpu;
 	struct cpu_ctx *cctx;
@@ -1249,21 +972,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		}
 	}
 
-	if (deferred_wakeups) {
-		timer = bpf_map_lookup_elem(&wakeup_timer, &key);
-		if (!timer) {
-			scx_bpf_error("Failed to lookup wakeup timer");
-			return -ESRCH;
-		}
-
-		bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
-		bpf_timer_set_callback(timer, wakeup_timerfn);
-
-		err = bpf_timer_start(timer, slice_ns, 0);
-		if (err) {
-			scx_bpf_error("Failed to arm wakeup timer");
-			return err;
-		}
+	err = timer_init();
+	if (err) {
+		scx_bpf_error("failed to init timer: %d", err);
+		return err;
 	}
 
 	bpf_for(cpu, 0, nr_cpu_ids) {

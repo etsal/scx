@@ -12,6 +12,8 @@ fn main() {
         .add_source("src/bpf/lib/sdt_alloc.bpf.c")
         .add_source("src/bpf/lib/sdt_task.bpf.c")
         .add_source("src/bpf/lib/topology.bpf.c")
+        .add_source("src/bpf/perf.bpf.c")
+        .add_source("src/bpf/timer.bpf.c")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
         .compile_link_gen()
         .unwrap();
