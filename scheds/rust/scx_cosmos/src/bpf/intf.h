@@ -37,4 +37,20 @@ struct domain_arg {
 	s32 sibling_cpu_id;
 };
 
+/*
+ * Per-task context.
+ */
+struct task_ctx {
+	u64 last_run_at;
+	u64 exec_runtime;
+	u64 wakeup_freq;
+	u64 last_woke_at;
+
+	/*
+	 * Per-task perf event metrics.
+	 */
+	u64 perf_events;
+	u64 perf_delta_t;
+};
+
 #endif /* __INTF_H */

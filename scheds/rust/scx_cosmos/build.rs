@@ -7,7 +7,12 @@ fn main() {
     scx_cargo::BpfBuilder::new()
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
+        .add_source("src/bpf/lib/arena.bpf.c")
+        .add_source("src/bpf/lib/bitmap.bpf.c")
+        .add_source("src/bpf/lib/sdt_alloc.bpf.c")
+        .add_source("src/bpf/lib/sdt_task.bpf.c")
+        .add_source("src/bpf/lib/topology.bpf.c")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .build()
+        .compile_link_gen()
         .unwrap();
 }

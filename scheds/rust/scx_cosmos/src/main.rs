@@ -30,8 +30,10 @@ use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::Skel;
 use log::{debug, info, warn};
 use scx_stats::prelude::*;
+use scx_arena::ArenaLib;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
@@ -454,6 +456,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
         rodata.mm_affinity = opts.mm_affinity;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
 
         // Enable perf event scheduling settings.
         if opts.perf_config > 0 {
@@ -511,6 +514,11 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
+
+        // Initialize the arena context
+        let task_size = std::mem::size_of::<task_ctx>();
+        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
+        arenalib.setup()?;
 
         // Configure CPU->node mapping (must be done after skeleton is loaded).
         for node in topo.nodes.values() {

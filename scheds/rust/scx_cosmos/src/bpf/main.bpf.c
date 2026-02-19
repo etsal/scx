@@ -4,6 +4,9 @@
  */
 #include <scx/common.bpf.h>
 #include <scx/percpu.bpf.h>
+
+#include <lib/sdt_task.h>
+
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -158,9 +161,9 @@ volatile u64 nr_event_dispatches;
 UEI_DEFINE(uei);
 
 /*
- * Maximum amount of CPUs supported by the system.
+ * Maximum amount of cpus supported by the system.
  */
-static u64 nr_cpu_ids;
+const volatile u32 nr_cpu_ids __weak;
 
 /*
  * Maximum possible NUMA node number.
@@ -172,28 +175,7 @@ const volatile u32 nr_node_ids;
  */
 static u64 vtime_now;
 
-/*
- * Per-task context.
- */
-struct task_ctx {
-	u64 last_run_at;
-	u64 exec_runtime;
-	u64 wakeup_freq;
-	u64 last_woke_at;
-
-	/*
-	 * Per-task perf event metrics.
-	 */
-	u64 perf_events;
-	u64 perf_delta_t;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctx_stor SEC(".maps");
+typedef struct task_ctx __arena task_ctx;
 
 /*
  * CPU -> NUMA node mapping.
@@ -217,15 +199,6 @@ static int cpu_node(s32 cpu)
 		return -ENOENT;
 
 	return *id;
-}
-
-/*
- * Return a local task context from a generic task.
- */
-struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
-{
-	return bpf_task_storage_get(&task_ctx_stor,
-					(struct task_struct *)p, 0, 0);
 }
 
 /*
@@ -291,7 +264,7 @@ static void start_counters(s32 cpu)
 	}
 }
 
-static void stop_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
+static void stop_counters(struct task_struct *p, task_ctx *tctx, s32 cpu)
 {
 	struct bpf_perf_event_value current, *start;
 	struct cpu_ctx *cctx;
@@ -318,7 +291,7 @@ static void stop_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
 /*
  * Return true if the task is triggering too many PMU events.
  */
-static inline bool is_event_heavy(const struct task_ctx *tctx)
+static inline bool is_event_heavy(const task_ctx *tctx)
 {
 	return tctx->perf_events > perf_threshold;
 }
@@ -798,7 +771,7 @@ static u64 task_slice(const struct task_struct *p)
  * to accumulate more time-slice credit than tasks with infrequent, long
  * sleeps.
  */
-static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
+static u64 task_dl(struct task_struct *p, task_ctx *tctx)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
 	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
@@ -971,7 +944,7 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu)
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
-	struct task_ctx *tctx;
+	task_ctx *tctx;
 	bool is_busy = is_system_busy();
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
@@ -1004,8 +977,8 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * Pick an event free CPU?
 	 */
 	if (perf_enabled) {
-		tctx = try_lookup_task_ctx(p);
-		if (tctx && is_event_heavy(tctx)) {
+		tctx = scx_task_data(p);
+		if (is_event_heavy(tctx)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 			__sync_fetch_and_add(&nr_event_dispatches, 1);
 			new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
@@ -1047,16 +1020,14 @@ static inline void wakeup_cpu(s32 cpu)
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
-	struct task_ctx *tctx;
+	task_ctx *tctx;
 	int new_cpu;
 
 	/*
 	 * Dispatch the task to the shared DSQ, using the deadline-based
 	 * scheduling.
 	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = scx_task_data(p);
 
 	/*
 	 * Immediately dispatch perf event-heavy tasks to a new CPU.
@@ -1142,11 +1113,9 @@ void BPF_STRUCT_OPS(cosmos_cpu_release, s32 cpu, struct scx_cpu_release_args *ar
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = scx_bpf_now(), delta_t;
-	struct task_ctx *tctx;
+	task_ctx *tctx;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = scx_task_data(p);
 
 	/*
 	 * Reset exec runtime (accumulated execution time since last
@@ -1168,11 +1137,9 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
-	struct task_ctx *tctx;
+	task_ctx *tctx;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = scx_task_data(p);
 
 	/*
 	 * Save a timestamp when the task begins to run (used to evaluate
@@ -1201,12 +1168,10 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
-	struct task_ctx *tctx;
+	task_ctx *tctx;
 	u64 slice;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = scx_task_data(p);
 
 	/* Update task's performance counters */
 	if (perf_enabled)
@@ -1238,17 +1203,16 @@ void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
 	p->scx.dsq_vtime = vtime_now;
 }
 
-s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct task_ctx *tctx;
+	return scx_task_alloc(p) ? 0 : -ENOMEM;
+}
 
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!tctx)
-		return -ENOMEM;
-
-	return 0;
+void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
+		   struct scx_exit_task_args *args)
+{
+	scx_task_free(p);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
@@ -1259,7 +1223,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	int cpu;
 	struct cpu_ctx *cctx;
 
-	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	err = scx_task_init(sizeof(task_ctx));
+	if (err)
+		return err;
 
 	/*
 	 * Create separate per-node DSQs if NUMA optimization is enabled,
@@ -1325,6 +1291,7 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .cpu_release		= (void *)cosmos_cpu_release,
 	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
+	       .exit_task		= (void *)cosmos_exit_task,
 	       .init			= (void *)cosmos_init,
 	       .exit			= (void *)cosmos_exit,
 	       .timeout_ms		= 5000,
