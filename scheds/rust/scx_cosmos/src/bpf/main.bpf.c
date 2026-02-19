@@ -207,6 +207,13 @@ bool is_cpu_idle(s32 cpu)
 	return idle;
 }
 
+
+/*
+ * XXX Link each cpu context with the topology.
+ * Then use the topology's map to find the sibling.
+ * Remove the smt mask and move the cpu context to arenas.
+ */
+
 /*
  * Return the SMT sibling CPU of a @cpu.
  */
@@ -268,6 +275,9 @@ static inline bool is_cpu_valid(s32 cpu)
 	return true;
 }
 
+/*
+ * XXX Use the topology to check if CPUs share cache.
+ */
 /*
  * Return true if @this_cpu and @that_cpu are in the same LLC, false
  * otherwise.
