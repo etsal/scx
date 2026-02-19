@@ -207,30 +207,34 @@ bool is_cpu_idle(s32 cpu)
 	return idle;
 }
 
-
-/*
- * XXX Link each cpu context with the topology.
- * Then use the topology's map to find the sibling.
- * Remove the smt mask and move the cpu context to arenas.
- */
-
 /*
  * Return the SMT sibling CPU of a @cpu.
  */
 static s32 smt_sibling(s32 cpu)
 {
-	const struct cpumask *smt;
+	topo_ptr topo_cpu;
 	struct cpu_ctx *cctx;
+	int ind;
+
+	if (!smt_enabled)
+		return cpu;
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
 		return cpu;
 
-	smt = cast_mask(cctx->smt);
-	if (!smt)
+	topo_cpu = cctx->topo->parent;
+	/*
+	 * Also catches the improbable case of
+	 * > 1 SMT sibling.
+	 */
+	if (topo_cpu->nr_children != 2)
 		return cpu;
 
-	return bpf_cpumask_first(smt);
+	/* Pick the other sibling. */
+	ind = (topo_cpu->children[0]->id == cpu) ? 1 : 0;
+
+	return topo_cpu->children[ind]->id;
 }
 
 /*
@@ -571,31 +575,6 @@ static int init_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(mask);
 
 	return *p_cpumask ? 0 : -ENOMEM;
-}
-
-SEC("syscall")
-int enable_sibling_cpu(struct domain_arg *input)
-{
-	struct cpu_ctx *cctx;
-	struct bpf_cpumask *mask, **pmask;
-	int err = 0;
-
-	cctx = try_lookup_cpu_ctx(input->cpu_id);
-	if (!cctx)
-		return -ENOENT;
-
-	pmask = &cctx->smt;
-	err = init_cpumask(pmask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = *pmask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
-	bpf_rcu_read_unlock();
-
-	return err;
 }
 
 /*
@@ -955,6 +934,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	int err;
 	int cpu;
 	struct cpu_ctx *cctx;
+	struct topo_iter iter;
+	topo_ptr topo;
 
 	err = scx_task_init(sizeof(task_ctx));
 	if (err)
@@ -988,11 +969,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		return err;
 	}
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	/* Associate per-cpu data with topology. */
+	TOPO_FOR_EACH_CPU(&iter, topo) {
+		cpu = topo->id;
+
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (!cctx)
 			continue;
+
 		cctx->perf_events = 0;
+		cctx->topo = topo;
 	}
 
 	return 0;

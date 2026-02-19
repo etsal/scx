@@ -1,5 +1,7 @@
 #pragma once
 
+#include <lib/topology.h>
+
 typedef struct task_ctx __arena task_ctx;
 
 /*
@@ -9,8 +11,11 @@ struct cpu_ctx {
 	u64 last_update;
 	u64 perf_lvl;
 	u64 perf_events;
-	struct bpf_cpumask __kptr *smt;
+
+	topo_ptr topo;
 };
+
+typedef struct cpu_ctx __arena cpu_ctx;
 
 struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu);
 bool is_cpu_idle(s32 cpu);
