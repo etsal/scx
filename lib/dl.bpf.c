@@ -180,6 +180,58 @@ static __always_inline u64 dl_log2(u64 v)
 }
 
 /*
+ * Clamp vtime: ensure it is no older than (vtime_now - sleep_credit).
+ * Used by all vruntime-family schedulers.
+ */
+static __always_inline u64 dl_clamp_vtime(u64 vtime, u64 vtime_now,
+					   u64 sleep_credit)
+{
+	u64 vtime_min = vtime_now - sleep_credit;
+
+	if (time_before(vtime, vtime_min))
+		vtime = vtime_min;
+	return vtime;
+}
+
+/*
+ * Compute sleep credit from slice_lag, lag_scale, and weight parameters.
+ * Used by cosmos, beerland, bpfland, flash.
+ */
+static __always_inline u64 dl_sleep_credit(u64 slice_lag, u64 lag_scale,
+					    u64 weight, u64 base_weight)
+{
+	return slice_lag * lag_scale * weight / base_weight;
+}
+
+/*
+ * Deadline = clamped vtime + weight-inverse exec_runtime.
+ * Shared core for cosmos and tickless.
+ */
+static __always_inline u64 dl_exec_runtime_deadline(u64 vtime, u64 vtime_now,
+						     u64 sleep_credit,
+						     u64 exec_runtime,
+						     u64 weight)
+{
+	vtime = dl_clamp_vtime(vtime, vtime_now, sleep_credit);
+	return vtime + dl_scale_by_weight_inverse(exec_runtime, weight);
+}
+
+/*
+ * Deadline = clamped vtime + capped awake_vtime.
+ * Shared core for beerland and bpfland.
+ */
+static __always_inline u64 dl_awake_vtime_deadline(u64 vtime, u64 vtime_now,
+						    u64 sleep_credit,
+						    u64 awake_vtime,
+						    u64 awake_max)
+{
+	vtime = dl_clamp_vtime(vtime, vtime_now, sleep_credit);
+	if (time_after(awake_vtime, awake_max))
+		awake_vtime = awake_max;
+	return vtime + awake_vtime;
+}
+
+/*
  * ==========================================================================
  *  COSMOS — vruntime + weight-inverse exec_runtime
  *
@@ -195,16 +247,12 @@ static u64 dl_cosmos(struct task_struct *p,
 		     const struct dl_params *params)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = dl_scale_by_weight(params->slice_lag * lag_scale,
-					    p->scx.weight);
-	u64 vtime_min = params->vtime_now - vsleep_max;
-	u64 vtime = p->scx.dsq_vtime;
+	u64 credit = dl_sleep_credit(params->slice_lag, lag_scale,
+				     p->scx.weight, 100);
 
-	if (time_before(vtime, vtime_min))
-		vtime = vtime_min;
-
-	return vtime + dl_scale_by_weight_inverse(tctx->exec_runtime,
-						  p->scx.weight);
+	return dl_exec_runtime_deadline(p->scx.dsq_vtime, params->vtime_now,
+					credit, tctx->exec_runtime,
+					p->scx.weight);
 }
 
 /*
@@ -221,21 +269,13 @@ static u64 dl_beerland(struct task_struct *p,
 		       const struct dl_params *params)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = dl_scale_by_weight(params->slice_lag * lag_scale,
-					    p->scx.weight);
-	u64 vtime_min = params->vtime_now - vsleep_max;
+	u64 credit = dl_sleep_credit(params->slice_lag, lag_scale,
+				     p->scx.weight, 100);
 	u64 awake_max = dl_scale_by_weight_inverse(params->slice_lag,
 						   p->scx.weight);
-	u64 vtime = p->scx.dsq_vtime;
-	u64 awake = tctx->awake_vtime;
 
-	if (time_before(vtime, vtime_min))
-		vtime = vtime_min;
-
-	if (time_after(awake, awake_max))
-		awake = awake_max;
-
-	return vtime + awake;
+	return dl_awake_vtime_deadline(p->scx.dsq_vtime, params->vtime_now,
+				      credit, tctx->awake_vtime, awake_max);
 }
 
 /*
@@ -260,9 +300,7 @@ static u64 dl_bpfland(struct task_struct *p,
 	const u64 q_thresh = MAX(starvation_thresh / params->slice_max, 1);
 
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 awake_max, vtime_min;
-	u64 vtime = p->scx.dsq_vtime;
-	u64 awake = tctx->awake_vtime;
+	u64 credit, awake_max;
 
 	/*
 	 * Queue-pressure dampening:
@@ -275,18 +313,13 @@ static u64 dl_bpfland(struct task_struct *p,
 		lag_scale = MAX(lag_scale * q_thresh /
 				(q_thresh + params->nr_queued), 1);
 
-	vtime_min = params->vtime_now -
-		    dl_scale_by_weight(params->slice_lag * lag_scale,
-				      p->scx.weight);
-	if (time_before(vtime, vtime_min))
-		vtime = vtime_min;
-
+	credit = dl_sleep_credit(params->slice_lag, lag_scale,
+				 p->scx.weight, 100);
 	awake_max = dl_scale_by_weight_inverse(params->slice_lag,
 					       p->scx.weight);
-	if (time_after(awake, awake_max))
-		awake = awake_max;
 
-	return vtime + awake;
+	return dl_awake_vtime_deadline(p->scx.dsq_vtime, params->vtime_now,
+				      credit, tctx->awake_vtime, awake_max);
 }
 
 /*
@@ -319,9 +352,8 @@ static u64 dl_flash(struct task_struct *p,
 		    const struct dl_params *params)
 {
 	u64 weight_n = flash_task_weight(p->scx.weight);
-	u64 lag_scale;
-	u64 max_sleep, vtime_min;
-	u64 vtime = p->scx.dsq_vtime;
+	u64 lag_scale, credit;
+	u64 vtime;
 	u64 exec = MIN(tctx->exec_runtime, params->run_lag);
 
 	/*
@@ -337,15 +369,9 @@ static u64 dl_flash(struct task_struct *p,
 	if (params->cpu_util)
 		lag_scale = lag_scale * params->cpu_util / 1024;
 
-	/*
-	 * Clamp vruntime.
-	 */
-	max_sleep = params->slice_lag * lag_scale * weight_n /
-		    FLASH_BASE_WEIGHT;
-	vtime_min = params->vtime_now > max_sleep ?
-		    params->vtime_now - max_sleep : 0;
-	if (time_before(vtime, vtime_min))
-		vtime = vtime_min;
+	credit = dl_sleep_credit(params->slice_lag, lag_scale,
+				 weight_n, FLASH_BASE_WEIGHT);
+	vtime = dl_clamp_vtime(p->scx.dsq_vtime, params->vtime_now, credit);
 
 	/*
 	 * Add execution penalty using normalized weight.
@@ -516,9 +542,8 @@ static u64 dl_rusty(struct task_struct *p,
 	/*
 	 * Clamp vtime: max one slice of sleep credit.
 	 */
-	vtime = p->scx.dsq_vtime;
-	if (time_before(vtime, params->dom_vruntime - params->slice_ns))
-		vtime = params->dom_vruntime - params->slice_ns;
+	vtime = dl_clamp_vtime(p->scx.dsq_vtime, params->dom_vruntime,
+			       params->slice_ns);
 
 	return vtime + request_len;
 }
@@ -547,14 +572,9 @@ static u64 dl_tickless(struct task_struct *p,
 		       struct task_ctx *tctx,
 		       const struct dl_params *params)
 {
-	u64 vtime_min = params->vtime_now - params->slice_ns;
-	u64 vtime = tctx->deadline;
-
-	if (time_before(vtime, vtime_min))
-		vtime = vtime_min;
-
-	return vtime + dl_scale_by_weight_inverse(tctx->exec_runtime,
-						  p->scx.weight);
+	return dl_exec_runtime_deadline(tctx->deadline, params->vtime_now,
+					params->slice_ns, tctx->exec_runtime,
+					p->scx.weight);
 }
 
 /*
@@ -579,12 +599,10 @@ static u64 dl_layered(struct task_struct *p,
 		      struct task_ctx *tctx,
 		      const struct dl_params *params)
 {
-	u64 vtime_min = params->vtime_now - params->slice_ns;
 	u64 vtime_max = params->vtime_now + 8192 * params->slice_ns;
-	u64 vtime = p->scx.dsq_vtime;
+	u64 vtime = dl_clamp_vtime(p->scx.dsq_vtime, params->vtime_now,
+				   params->slice_ns);
 
-	if (time_before(vtime, vtime_min))
-		vtime = vtime_min;
 	if (time_after(vtime, vtime_max))
 		vtime = vtime_max;
 
