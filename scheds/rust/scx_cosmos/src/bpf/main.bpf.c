@@ -28,30 +28,6 @@ private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
  */
 static u64 vtime_now;
 
-/*
- * CPU -> NUMA node mapping.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, u32);	/* cpu_id */
-	__type(value, u32);	/* node_id */
-} cpu_node_map SEC(".maps");
-
-static int cpu_node(s32 cpu)
-{
-	u32 *id;
-
-	if (!numa_enabled)
-		return 0;
-
-	id = bpf_map_lookup_elem(&cpu_node_map, &cpu);
-	if (!id)
-		return -ENOENT;
-
-	return *id;
-}
-
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -68,6 +44,21 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
 }
+
+static int cpu_node(s32 cpu)
+{
+	struct cpu_ctx *cctx;
+
+	if (!numa_enabled)
+		return 0;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return 0;
+
+	return TOPO_NODE(cctx->topo)->id;
+}
+
 
 /*
  * Exponential weighted moving average (EWMA).

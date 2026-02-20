@@ -27,7 +27,6 @@ use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore;
-use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::Skel;
@@ -519,20 +518,6 @@ impl<'a> Scheduler<'a> {
         let task_size = std::mem::size_of::<task_ctx>();
         let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
         arenalib.setup()?;
-
-        // Configure CPU->node mapping (must be done after skeleton is loaded).
-        for node in topo.nodes.values() {
-            for cpu in node.all_cpus.values() {
-                if opts.verbose {
-                    info!("CPU{} -> node{}", cpu.id, node.id);
-                }
-                skel.maps.cpu_node_map.update(
-                    &(cpu.id as u32).to_ne_bytes(),
-                    &(node.id as u32).to_ne_bytes(),
-                    MapFlags::ANY,
-                )?;
-            }
-        }
 
         // Setup performance events for all CPUs
         if opts.perf_config > 0 {
