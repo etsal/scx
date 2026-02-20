@@ -83,15 +83,9 @@ static inline int topo_iter_start(struct topo_iter *iter)
 extern u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 extern int nr_topo_nodes[TOPO_MAX_LEVEL];
 
-static inline void
-topo_assert_leaf(topo_ptr topo)
-{
-	if (topo->level != TOPO_CPU)
-		scx_bpf_error("topo node not a leaf");
-}
-
-#define TOPO_CORE(topo) ((topo)->parent)
-#define TOPO_LLC(topo) (TOPO_CORE(topo)->parent)
-#define TOPO_NODE(topo) (TOPO_LLC(topo)->parent)
+#define TO_CPU(cpu)	(((topo_ptr)topo_nodes[TOPO_CPU][(cpu)]))
+#define TO_CORE(cpu)	(TO_CPU((cpu))->parent)
+#define TO_LLC(cpu)	(TO_CORE((cpu))->parent)
+#define TO_NODE(cpu)	(TO_LLC((cpu))->parent)
 
 #define TOPO_NR(type) nr_topo_nodes[TOPO_##type - 1]

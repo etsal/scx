@@ -3806,6 +3806,7 @@ dependencies = [
  "libbpf-rs",
  "log",
  "perf-event-open-sys",
+ "scx_arena",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",

@@ -3,13 +3,19 @@
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
 #include <scx/common.bpf.h>
-#include <scx/percpu.bpf.h>
 
 #include <lib/sdt_task.h>
 
 #include "intf.h"
 #include "params.h"
 #include "cosmos.h"
+
+
+/*
+ * XXX GPU tracking module
+ * XXX Tasks with weird cpumasks
+ * XXX CPU affinity for specific tasks
+ */
 
 char _license[] SEC("license") = "GPL";
 
@@ -47,16 +53,10 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 
 static int cpu_node(s32 cpu)
 {
-	struct cpu_ctx *cctx;
-
 	if (!numa_enabled)
 		return 0;
 
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return 0;
-
-	return TOPO_NODE(cctx->topo)->id;
+	return TO_NODE(cpu)->id;
 }
 
 
@@ -271,9 +271,6 @@ static inline bool is_cpu_valid(s32 cpu)
 }
 
 /*
- * XXX Use the topology to check if CPUs share cache.
- */
-/*
  * Return true if @this_cpu and @that_cpu are in the same LLC, false
  * otherwise.
  */
@@ -285,8 +282,9 @@ static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
 	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
 		return false;
 
-	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+	return TO_LLC(this_cpu) == TO_LLC(that_cpu);
 }
+
 /*
  * Return true if @this_cpu is faster than @that_cpu, false otherwise.
  */
