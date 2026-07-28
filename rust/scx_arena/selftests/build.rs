@@ -4,11 +4,20 @@
 // GNU General Public License version 2.
 
 fn main() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let libarena_include = std::path::Path::new(&manifest_dir).join("../../../libarena/include");
+
     scx_cargo::BpfBuilder::new()
         .unwrap()
+        .add_include_path(libarena_include.to_str().unwrap())
+        .add_cflag("-DENABLE_ATOMICS_TESTS")
         .enable_skel("src/bpf/main.bpf.c", "main")
         .add_source("src/bpf/lib/arena.bpf.c")
+        .add_source("../../../libarena/src/bitmap.bpf.c")
+        .add_source("../../../libarena/src/buddy.bpf.c")
+        .add_source("../../../libarena/src/common.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
+        .add_source("src/bpf/lib/cpumask.bpf.c")
         .add_source("src/bpf/lib/dhq.bpf.c")
         .add_source("src/bpf/lib/btree.bpf.c")
         .add_source("src/bpf/lib/lvqueue.bpf.c")
@@ -21,7 +30,6 @@ fn main() {
         .add_source("src/bpf/lib/selftests/st_arena_topology_timer.bpf.c")
         .add_source("src/bpf/lib/selftests/st_atq.bpf.c")
         .add_source("src/bpf/lib/selftests/st_dhq.bpf.c")
-        .add_source("src/bpf/lib/selftests/st_bitmap.bpf.c")
         .add_source("src/bpf/lib/selftests/st_btree.bpf.c")
         .add_source("src/bpf/lib/selftests/st_lvqueue.bpf.c")
         .add_source("src/bpf/lib/selftests/st_minheap.bpf.c")

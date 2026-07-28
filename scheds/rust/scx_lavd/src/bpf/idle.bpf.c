@@ -624,7 +624,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 					WRITE_ONCE(cpdc->is_stealee, false);
 				}
 				*sticky_cpdom = mig_cpdom;
-				break;
+				return cpu;
 			}
 		}
 	}

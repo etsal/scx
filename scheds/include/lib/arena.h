@@ -18,6 +18,7 @@ struct arena_init_args {
 };
 
 int arena_init(struct arena_init_args *args);
+int arena_idle_init(void);
 
 struct arena_alloc_mask_args {
 	u64 bitmap;

@@ -31,13 +31,13 @@ int topo_contains(topo_ptr topo, u32 cpu)
 }
 
 static
-int topo_subset(topo_ptr topo, scx_bitmap_t mask)
+int topo_subset(topo_ptr topo, scx_cpumask_t mask)
 {
 	return bmp_subset(SCX_BITMAP_NR_BITS, topo->mask, mask);
 }
 
 static
-topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
+topo_ptr topo_node(topo_ptr parent, scx_cpumask_t mask, s16 id)
 {
 	volatile topo_ptr topo; /* add volatile to satisfy the verifier. */
 	u32 level = parent ? parent->level + 1 : 0;
@@ -102,7 +102,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
 
 
 static __noinline
-int topo_add(topo_ptr parent, scx_bitmap_t mask, s16 id)
+int topo_add(topo_ptr parent, scx_cpumask_t mask, s16 id)
 {
 	topo_ptr child;
 
@@ -131,7 +131,7 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask, s16 id)
 }
 
 __weak
-int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
+int topo_init(scx_cpumask_t mask, u64 data_size, s16 id)
 {
 	/* Initializing the child to appease the verifier. */
 	topo_ptr topo, child = NULL;

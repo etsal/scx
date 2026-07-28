@@ -43,6 +43,18 @@ int arena_init(struct arena_init_args *args)
 }
 
 SEC("syscall")
+int arena_idle_init(void)
+{
+	int ret;
+
+	ret = scx_idle_init();
+	if (ret)
+		arena_stderr("scx_idle_init failed with %d", ret);
+
+	return ret;
+}
+
+SEC("syscall")
 int arena_alloc_mask(struct arena_alloc_mask_args *args)
 {
 	struct arena_bitmap __arena *bitmap;

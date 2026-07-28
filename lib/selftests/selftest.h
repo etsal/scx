@@ -14,7 +14,7 @@
  * is a grep-time catch, whereas a wrong ordering would be a silent runtime
  * mismatch that is much harder to detect.
  *
- * We didn’t integrate arena_topology_timer, dhq, and bitmap for now since
+ * We didn’t integrate arena_topology_timer and dhq for now since
  * they are still in progress.
  */
 enum scx_selftest_id {
@@ -50,7 +50,6 @@ typedef struct task_ctx_nonarena __arena task_ctx;
 int scx_selftest_arena_topology_timer(void);
 int scx_selftest_atq(void);
 int scx_selftest_dhq(void);
-int scx_selftest_bitmap(void);
 int scx_selftest_btree(void);
 int scx_selftest_lvqueue(void);
 int scx_selftest_minheap(void);

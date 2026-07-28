@@ -196,6 +196,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
+#include <lib/cpumask.h>
 
 char _license[] SEC("license") = "GPL";
 
@@ -790,6 +791,25 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	return ret;
 }
 
+static __always_inline void clear_idle_cpu_claim(task_ctx *taskc)
+{
+	taskc->idle_claim_cpu_id = -ENOENT;
+}
+
+static __always_inline void revert_idle_cpu_claim(task_ctx *taskc)
+{
+	s32 cpu = taskc->idle_claim_cpu_id;
+	int ret;
+
+	if (cpu < 0)
+		return;
+
+	clear_idle_cpu_claim(taskc);
+	ret = scx_idle_update(cpu, true);
+	if (ret)
+		scx_bpf_error("Failed to revert idle claim for cpu %d: %d", cpu, ret);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -851,6 +871,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		struct cpu_ctx *cpuc;
 
 		set_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+		ictx.taskc->idle_claim_cpu_id = cpu_id;
 
 		/*
 		 * If there is an idle cpu and its associated DSQs are empty,
@@ -858,6 +879,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
+			revert_idle_cpu_claim(ictx.taskc);
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
 			goto out;
 		}
@@ -878,10 +900,12 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			account_queued_load_pcpu(ictx.taskc,
 						 get_primary_cpu(cpuc->cpu_id));
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+			clear_idle_cpu_claim(ictx.taskc);
 			goto out;
 		}
 	} else {
 		reset_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+		clear_idle_cpu_claim(ictx.taskc);
 	}
 out:
 	return cpu_id;
@@ -953,6 +977,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			ictx.prev_cpu = bpf_cpumask_first(p->cpus_ptr);
 
 		cpu = pick_idle_cpu(&ictx, &is_idle);
+		if (is_idle)
+			taskc->idle_claim_cpu_id = cpu;
+		else
+			clear_idle_cpu_claim(taskc);
 	} else {
 		cpu = task_cpu;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
@@ -961,6 +989,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
+		revert_idle_cpu_claim(taskc);
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
@@ -984,6 +1013,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (enable_cpu_bw && (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
 		debugln("Task %s[pid%d/cgid%llu] is throttled.",
 			p->comm, p->pid, taskc->cgrp_id);
+		revert_idle_cpu_claim(taskc);
 		return;
 	}
 
@@ -1022,6 +1052,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
 	}
 	account_queued_load(taskc, cpuc->cpdom_id);
+	clear_idle_cpu_claim(taskc);
 
 	/*
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
@@ -1895,12 +1926,19 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 {
 	/*
 	 * The idle duration is accumulated to calculate the CPU utilization.
-	 * Since SCX_OPS_KEEP_BUILTIN_IDLE is specified, we still rely on the
-	 * default idle core tracking and core selection algorithm.
+	 * SCX_OPS_KEEP_BUILTIN_IDLE keeps the kernel tracker active while the
+	 * local tracker is used by the arena CPU selection implementation.
 	 */
 
 	struct cpu_ctx *cpuc;
 	u64 now;
+	int ret;
+
+	ret = scx_idle_update(cpu, idle);
+	if (ret) {
+		scx_bpf_error("Failed to update idle state for cpu %d: %d", cpu, ret);
+		return;
+	}
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -2107,6 +2145,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
+	taskc->idle_claim_cpu_id = -ENOENT;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;

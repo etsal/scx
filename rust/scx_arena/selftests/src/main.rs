@@ -128,6 +128,19 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
         );
     }
 
+    let input = ProgramInput {
+        context_in: None,
+        ..Default::default()
+    };
+
+    let output = skel.progs.arena_buddy_reset.test_run(input)?;
+    if output.return_value != 0 {
+        bail!(
+            "Could not initialize arena buddy allocator, arena_buddy_reset returned {}",
+            output.return_value as i32
+        );
+    }
+
     Ok(())
 }
 
@@ -261,6 +274,20 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
+fn setup_idle(skel: &mut BpfSkel<'_>) -> Result<()> {
+    let input = ProgramInput {
+        context_in: None,
+        ..Default::default()
+    };
+
+    let output = skel.progs.arena_idle_init.test_run(input)?;
+    if output.return_value != 0 {
+        bail!("arena_idle_init returned {}", output.return_value as i32);
+    }
+
+    Ok(())
+}
+
 fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
     let prog_fd = skel.progs.arena_selftest.as_fd().as_raw_fd();
     let mut buf = vec![0u8; 4096];
@@ -366,6 +393,7 @@ fn main() {
 
     setup_arenas(&mut skel).unwrap();
     setup_topology(&mut skel).unwrap();
+    setup_idle(&mut skel).unwrap();
 
     let to_run: Vec<&str> = if opts.tests.is_empty() {
         TEST_CASES.iter().map(|(n, _)| *n).collect()

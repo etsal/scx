@@ -17,7 +17,7 @@ enum topo_level {
 struct topology {
 	topo_ptr parent;
 	size_t nr_children;
-	scx_bitmap_t mask;
+	scx_cpumask_t mask;
 	/*
 	 * level and level_ids are hot in the fast path; keep them adjacent
 	 * to ensure they land in the same cache line.
@@ -45,12 +45,12 @@ extern volatile topo_ptr topo_all;
  */
 extern u32 topo_max_children[TOPO_MAX_LEVEL];
 
-int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id);
+int topo_init(scx_cpumask_t mask, u64 data_size, s16 id);
 int topo_contains(topo_ptr topo, u32 cpu);
 int topo_cpu_to_llc_id(u32 cpu);
 
 u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level);
-#define topo_mask_level(topo, level) ((scx_bitmap_t) topo_mask_level_internal((topo), (level)))
+#define topo_mask_level(topo, level) ((scx_cpumask_t) topo_mask_level_internal((topo), (level)))
 
 int topo_print(void);
 int topo_print_by_level(void);

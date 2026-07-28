@@ -4,11 +4,12 @@
 
 #include <lib/cpumask.h>
 #include <lib/percpu.h>
+#include <lib/topology.h>
 
 const volatile u32 nr_cpu_ids = NR_CPU_IDS_UNINIT;
 
 static __always_inline s32
-scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask, u64 __arg_arena *start)
+scx_bitmap_pick_any_cpu_once(scx_cpumask_t mask, u64 __arg_arena *start)
 {
 	u64 old;
 	u64 ind, i, nr_longs = SCX_BITMAP_NR_LONGS;
@@ -36,23 +37,11 @@ scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask, u64 __arg_arena *sta
 		return ind * 64 + cpu;
 	}
 
-	return -ENOSPC;
+	return -EBUSY;
 }
 
 __weak s32
-scx_bitmap_pick_any_cpu_from(scx_bitmap_t __arg_arena mask, u64 __arg_arena *start)
-{
-	s32 cpu;
-
-	do {
-		cpu = scx_bitmap_pick_any_cpu_once(mask, start);
-	} while (cpu == -EAGAIN && can_loop);
-
-	return cpu;
-}
-
-__weak s32
-scx_bitmap_pick_any_cpu(scx_bitmap_t __arg_arena mask)
+scx_idle_pick_any_cpu(scx_cpumask_t mask)
 {
 	u64 zero = 0;
 	s32 cpu;
@@ -64,66 +53,125 @@ scx_bitmap_pick_any_cpu(scx_bitmap_t __arg_arena mask)
 	return cpu;
 }
 
-__weak s32
-scx_bitmap_vacate_cpu(scx_bitmap_t __arg_arena mask, s32 cpu)
-{
-	int off = (u32)cpu / 64;
+static scx_cpumask_t mask_idle_core;
+static scx_cpumask_t mask_idle_smt;
+static bool smt_active;
 
-	if (cpu < 0 || cpu >= nr_cpu_ids) {
-		arena_stderr("freeing invalid cpu");
-		return -EINVAL;
-	}
-
-	if (off < 0 || off >= SCX_BITMAP_NR_LONGS || off >= SCXMASK_NLONG) {
-		arena_stderr("impossible out-of-bounds on free");
-		return -EINVAL;
-	}
-
-	bmp_set_bit(cpu, mask);
-	return 0;
-}
-
-static __always_inline int
-bitmap_copy_to_stack(struct scx_bitmap_stack *dst, scx_bitmap_t __arg_arena src)
+static __always_inline s32
+scx_idle_any_and(scx_cpumask_t a, scx_cpumask_t b)
 {
 	u64 nr_longs = SCX_BITMAP_NR_LONGS;
+	u64 word;
 	int i;
 
-	if (unlikely(!src || !dst))
+	if (unlikely(nr_longs > SCXMASK_NLONG))
 		return -EINVAL;
 
-	bpf_for(i, 0, SCXMASK_NLONG) {
-		if (i >= nr_longs)
-			break;
-		dst->bits[i] = src->bits[i];
+	for (i = zero; i < nr_longs && can_loop; i++) {
+		word = a->bits[i] & b->bits[i];
+		if (word)
+			return i * BITS_PER_LONG_LONG + arena_ffs(word);
 	}
 
-	return 0;
+	return -EBUSY;
 }
 
-__weak int
-scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
-		   scx_bitmap_t __arg_arena scx_bitmap)
+static __always_inline topo_ptr scx_idle_cpu_core(s32 cpu)
 {
-	struct scx_bitmap_stack *tmp;
-	int ret;
+	topo_ptr cpu_node;
 
-	tmp = scx_percpu_scx_bitmap_stack();
-	ret = bitmap_copy_to_stack(tmp, scx_bitmap);
-	if (ret)
-		return ret;
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return NULL;
 
-	ret = __COMPAT_bpf_cpumask_populate((struct cpumask *)bpfmask, tmp->bits, sizeof(tmp->bits));
-	if (unlikely(ret)) {
-		arena_stderr("error %d when calling bpf_cpumask_populate", ret);
-		return ret;
+	cpu_node = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
+	if (!cpu_node || cpu_node->level != TOPO_CPU || !cpu_node->parent ||
+	    cpu_node->parent->level != TOPO_CORE)
+		return NULL;
+
+	return cpu_node->parent;
+}
+
+static __always_inline int scx_idle_set_smt(topo_ptr core, bool idle)
+{
+	topo_ptr sibling;
+	s32 sibling_cpu;
+	int i;
+
+	for (i = zero; i < core->nr_children && can_loop; i++) {
+		sibling = core->children[i];
+		if (!sibling || sibling->level != TOPO_CPU)
+			return -EINVAL;
+
+		sibling_cpu = sibling->level_ids[TOPO_CPU];
+		if (sibling_cpu < 0 || sibling_cpu >= nr_cpu_ids)
+			return -EINVAL;
+
+		if (idle)
+			bmp_set_bit(sibling_cpu, mask_idle_smt);
+		else
+			bmp_clear_bit(sibling_cpu, mask_idle_smt);
 	}
 
 	return 0;
 }
 
+static __always_inline bool scx_idle_core_is_idle(topo_ptr core)
+{
+	topo_ptr sibling;
+	s32 sibling_cpu;
+	int i;
+
+	for (i = zero; i < core->nr_children && can_loop; i++) {
+		sibling = core->children[i];
+		if (!sibling || sibling->level != TOPO_CPU)
+			return false;
+
+		sibling_cpu = sibling->level_ids[TOPO_CPU];
+		if (sibling_cpu < 0 || sibling_cpu >= nr_cpu_ids ||
+		    !bmp_test_bit(sibling_cpu, mask_idle_core))
+			return false;
+	}
+
+	return true;
+}
+
+__weak
+int scx_idle_init(void)
+{
+	scx_cpumask_t idle_core, idle_smt;
+	topo_ptr root = topo_all;
+	u32 mask_bits;
+
+	if (nr_cpu_ids == NR_CPU_IDS_UNINIT)
+		return -ENOENT;
+	mask_bits = round_up(nr_cpu_ids, 64);
+	if (!root || root->level != TOPO_TOP || !root->mask)
+		return -ENOENT;
+	if (mask_idle_core || mask_idle_smt)
+		return -EALREADY;
+
+	idle_core = bmp_alloc(mask_bits);
+	idle_smt = bmp_alloc(mask_bits);
+	if (!idle_core || !idle_smt) {
+		if (idle_core)
+			arena_free(idle_core);
+		if (idle_smt)
+			arena_free(idle_smt);
+		return -ENOMEM;
+	}
+
+	bmp_copy(mask_bits, idle_core, root->mask);
+	bmp_copy(mask_bits, idle_smt, root->mask);
+
+	mask_idle_core = idle_core;
+	mask_idle_smt = idle_smt;
+	smt_active = topo_max_children[TOPO_CORE] > 1;
+
+	return 0;
+}
+
 __weak int
-scx_bitmap_from_bpf(scx_bitmap_t __arg_arena bitmap, const cpumask_t *bpfmask __arg_trusted)
+scx_idle_import(scx_cpumask_t bitmap, const cpumask_t *bpfmask __arg_trusted)
 {
 	u64 nr_longs = SCX_BITMAP_NR_LONGS;
 	int i;
@@ -137,83 +185,101 @@ scx_bitmap_from_bpf(scx_bitmap_t __arg_arena bitmap, const cpumask_t *bpfmask __
 	return 0;
 }
 
-__weak
-bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted)
+__weak u64
+scx_idle_mask_core_internal(void)
 {
-	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
+	return (u64)mask_idle_core;
+}
 
-	scx_bitmap_from_bpf(tmp, small);
-
-	return bmp_subset(SCX_BITMAP_NR_BITS, big, tmp);
+__weak u64
+scx_idle_mask_smt_internal(void)
+{
+	return (u64)mask_idle_smt;
 }
 
 __weak
-bool scx_bitmap_intersects_cpumask(scx_bitmap_t __arg_arena scx, const struct cpumask *bpf __arg_trusted)
+bool scx_idle_test_and_clear(u32 cpu)
 {
-	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
+	topo_ptr core;
+	scx_cpumask_t smts;
 
-	scx_bitmap_from_bpf(tmp, bpf);
+	if (smt_active) {
+		core = scx_idle_cpu_core(cpu);
+		if (!core)
+			return false;
+		smts = core->mask;
 
-	return bmp_intersects(SCX_BITMAP_NR_BITS, scx, tmp);
+		if (bmp_intersects(nr_cpu_ids, mask_idle_smt, smts)) {
+			if (scx_idle_set_smt(core, false))
+				return false;
+		} else if (bmp_test_bit(cpu, mask_idle_smt)) {
+			__bmp_clear_bit(cpu, mask_idle_smt);
+		}
+	}
+
+	return bmp_test_and_clear_bit(cpu, mask_idle_core);
 }
 
-__weak
-int scx_bitmap_and_cpumask(scx_bitmap_t dst __arg_arena,
-			       scx_bitmap_t scx __arg_arena,
-			       const struct cpumask *bpf __arg_trusted)
+__weak s32
+scx_idle_pick(scx_cpumask_t cpus_allowed, u64 flags)
 {
-	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
+	int cpu;
 
-	scx_bitmap_from_bpf(tmp, bpf);
+	do {
+		if (smt_active) {
+			cpu = scx_idle_any_and(mask_idle_smt, cpus_allowed);
+			if (cpu >= 0)
+				goto found;
 
-	bmp_and(SCX_BITMAP_NR_BITS, dst, scx, tmp);
+			if (flags & SCX_PICK_IDLE_CORE)
+				return -EBUSY;
+		}
 
-	return 0;
-}
+		cpu = scx_idle_any_and(mask_idle_core, cpus_allowed);
+		if (cpu < 0)
+			return -EBUSY;
 
-__weak
-s32 scx_bitmap_pick_idle_cpu(scx_bitmap_t mask __arg_arena, int flags)
-{
-	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
-	s32 cpu;
-
-	if (!bpf)
-		return -1;
-
-	scx_bitmap_to_bpf(bpf, mask);
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpf), flags);
-
-	scx_bitmap_from_bpf(mask, cast_mask(bpf));
+found:
+		;
+	} while (!scx_idle_test_and_clear(cpu) && can_loop);
 
 	return cpu;
 }
 
-__weak
-s32 scx_bitmap_any_distribute(scx_bitmap_t mask __arg_arena)
+__weak s32
+scx_idle_update(s32 cpu, bool idle)
 {
-	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
-	s32 cpu;
+	topo_ptr core;
 
-	if (!bpf)
-		return -1;
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+	if (!mask_idle_core || !mask_idle_smt)
+		return -ENODEV;
 
-	scx_bitmap_to_bpf(bpf, mask);
-	cpu = bpf_cpumask_any_distribute(cast_mask(bpf));
+	if (!smt_active) {
+		if (idle) {
+			bmp_set_bit(cpu, mask_idle_core);
+			bmp_set_bit(cpu, mask_idle_smt);
+		} else {
+			bmp_clear_bit(cpu, mask_idle_core);
+			bmp_clear_bit(cpu, mask_idle_smt);
+		}
+		return 0;
+	}
 
-	return cpu;
-}
+	core = scx_idle_cpu_core(cpu);
+	if (!core)
+		return -EINVAL;
 
-__weak
-s32 scx_bitmap_any_and_distribute(scx_bitmap_t scx __arg_arena, const struct cpumask *bpf)
-{
-	struct bpf_cpumask *tmp = scx_percpu_bpfmask();
-	s32 cpu;
+	if (!idle) {
+		bmp_clear_bit(cpu, mask_idle_core);
+		return scx_idle_set_smt(core, false);
+	}
 
-	if (!bpf || !tmp)
-		return -1;
+	bmp_set_bit(cpu, mask_idle_core);
+	if (!scx_idle_core_is_idle(core))
+		return 0;
 
-	scx_bitmap_to_bpf(tmp, scx);
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(tmp), bpf);
-
-	return cpu;
+	/* The SMT mask is an optimization and converges after racing updates. */
+	return scx_idle_set_smt(core, true);
 }

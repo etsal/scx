@@ -271,6 +271,20 @@ impl<'a> ArenaLib<'a> {
         Ok(())
     }
 
+    fn setup_idle(&self) -> Result<()> {
+        let input = ProgramInput {
+            context_in: None,
+            ..Default::default()
+        };
+
+        let ret = self.run_prog_by_name("arena_idle_init", input)?;
+        if ret != 0 {
+            bail!("arena_idle_init returned {}", ret);
+        }
+
+        Ok(())
+    }
+
     /// Create an Arenalib object This call only initializes the Rust side of Arenalib.
     pub fn init(obj: &'a mut Object, task_size: usize, nr_cpu_ids: usize) -> Result<Self> {
         if nr_cpu_ids >= MAX_CPU_SUPPORTED {
@@ -288,6 +302,7 @@ impl<'a> ArenaLib<'a> {
     pub fn setup(&self) -> Result<()> {
         self.setup_arena()?;
         self.setup_topology()?;
+        self.setup_idle()?;
 
         Ok(())
     }

@@ -18,7 +18,7 @@ int scx_bitmap_init(__u64 total_mask_size)
 __weak
 u64 scx_bitmap_alloc_internal(void)
 {
-	scx_bitmap_t mask;
+	scx_cpumask_t mask;
 	int i;
 
 	mask = arena_malloc(mask_size);
@@ -38,7 +38,7 @@ u64 scx_bitmap_alloc_internal(void)
  */
 
 __weak
-int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
+int scx_bitmap_free(scx_cpumask_t mask)
 {
 	arena_subprog_init();
 
@@ -47,7 +47,7 @@ int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
 }
 
 __weak
-int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena src)
+int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_cpumask_t src)
 {
 	int i;
 
@@ -66,27 +66,27 @@ int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena sr
 }
 
 __weak
-int scx_bitmap_set_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
+int scx_bitmap_set_cpu(u32 cpu, scx_cpumask_t mask)
 {
 	mask->bits[cpu / 64] |= 1ULL << (cpu % 64);
 	return 0;
 }
 
 __weak
-int scx_bitmap_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
+int scx_bitmap_clear_cpu(u32 cpu, scx_cpumask_t mask)
 {
 	mask->bits[cpu / 64] &= ~(1ULL << (cpu % 64));
 	return 0;
 }
 
 __weak
-bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
+bool scx_bitmap_test_cpu(u32 cpu, scx_cpumask_t mask)
 {
 	return mask->bits[cpu / 64] & (1ULL << (cpu % 64));
 }
 
 __weak
-bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
+bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_cpumask_t mask)
 {
 	u64 bit = 1ULL << (cpu % 64);
 	u32 idx = cpu / 64;
@@ -110,7 +110,7 @@ bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 }
 
 __weak
-int scx_bitmap_clear(scx_bitmap_t __arg_arena mask)
+int scx_bitmap_clear(scx_cpumask_t mask)
 {
 	int i;
 
@@ -122,7 +122,7 @@ int scx_bitmap_clear(scx_bitmap_t __arg_arena mask)
 }
 
 __weak
-int scx_bitmap_and(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2)
+int scx_bitmap_and(scx_cpumask_t dst, scx_cpumask_t src1, scx_cpumask_t src2)
 {
 	int i;
 
@@ -134,7 +134,7 @@ int scx_bitmap_and(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, 
 }
 
 __weak
-int scx_bitmap_or(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2)
+int scx_bitmap_or(scx_cpumask_t dst, scx_cpumask_t src1, scx_cpumask_t src2)
 {
 	int i;
 
@@ -146,7 +146,7 @@ int scx_bitmap_or(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, s
 }
 
 __weak
-bool scx_bitmap_empty(scx_bitmap_t __arg_arena mask)
+bool scx_bitmap_empty(scx_cpumask_t mask)
 {
 	int i;
 
@@ -159,7 +159,7 @@ bool scx_bitmap_empty(scx_bitmap_t __arg_arena mask)
 }
 
 __weak
-int scx_bitmap_copy(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src)
+int scx_bitmap_copy(scx_cpumask_t dst, scx_cpumask_t src)
 {
 	int i;
 
@@ -171,7 +171,7 @@ int scx_bitmap_copy(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src)
 }
 
 __weak int
-scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bpfmask __arg_trusted)
+scx_bitmap_from_bpf(scx_cpumask_t scx_bitmap, const cpumask_t *bpfmask __arg_trusted)
 {
 	int i;
 
@@ -185,7 +185,7 @@ scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bpfmas
 }
 
 __weak
-bool scx_bitmap_subset(scx_bitmap_t __arg_arena big, scx_bitmap_t __arg_arena small)
+bool scx_bitmap_subset(scx_cpumask_t big, scx_cpumask_t small)
 {
 	int i;
 
@@ -198,7 +198,7 @@ bool scx_bitmap_subset(scx_bitmap_t __arg_arena big, scx_bitmap_t __arg_arena sm
 }
 
 __weak
-bool scx_bitmap_intersects(scx_bitmap_t __arg_arena arg1, scx_bitmap_t __arg_arena arg2)
+bool scx_bitmap_intersects(scx_cpumask_t arg1, scx_cpumask_t arg2)
 {
 	int i;
 
@@ -211,7 +211,7 @@ bool scx_bitmap_intersects(scx_bitmap_t __arg_arena arg1, scx_bitmap_t __arg_are
 }
 
 __weak
-int scx_bitmap_print(scx_bitmap_t __arg_arena mask)
+int scx_bitmap_print(scx_cpumask_t mask)
 {
 	int i;
 
