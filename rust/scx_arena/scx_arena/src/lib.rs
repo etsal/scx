@@ -19,6 +19,10 @@ use std::io::ErrorKind;
 
 #[cfg(feature = "build-support")]
 pub mod build_support;
+
+mod scx_libarena;
+pub use scx_libarena::ScxLibArena;
+
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
