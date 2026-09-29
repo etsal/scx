@@ -98,6 +98,18 @@ impl ScxLibArena {
 
     /// Set up basic library state.
     fn setup_arena(obj: &Object, task_size: usize, task_align: usize) -> Result<()> {
+        // arena_init() allocates per-CPU bitmaps, so the buddy allocator must
+        // be ready before running it.
+        let input = ProgramInput {
+            context_in: None,
+            ..Default::default()
+        };
+
+        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
+        if ret != 0 {
+            bail!("Could not initialize libarena buddy allocator: {}", ret);
+        }
+
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
@@ -117,16 +129,6 @@ impl ScxLibArena {
         };
 
         let ret = Self::run_prog_by_name(obj, "arena_init", input)?;
-        if ret != 0 {
-            bail!("Could not initialize arenas, setup_arenas returned {}", ret);
-        }
-
-        let input = ProgramInput {
-            context_in: None,
-            ..Default::default()
-        };
-
-        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
         if ret != 0 {
             bail!("Could not initialize arenas, setup_arenas returned {}", ret);
         }
